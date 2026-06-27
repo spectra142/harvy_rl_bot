@@ -1,0 +1,26 @@
+# Core RL & ML
+gymnasium>=0.29.0
+stable-baselines3>=2.0.0
+torch>=2.0.0
+numpy>=1.24.0
+
+# Environment & IPC
+pyyaml>=6.0
+minecraft-data>=3.17.0
+
+# Dashboard
+matplotlib>=3.7.0
+
+# Logging & Monitoring
+tensorboard>=2.13.0
+
+# Development
+pytest>=7.4.0
+black>=23.0.0
+
+# Mission Control server
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+websockets>=12.0
+httpx>=0.27.0
+pytest-asyncio>=0.23.0

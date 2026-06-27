@@ -1,0 +1,162 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 47% 3%;
+    --foreground: 210 40% 96%;
+    --card: 222 47% 11%;
+    --card-foreground: 210 40% 96%;
+    --popover: 222 47% 11%;
+    --popover-foreground: 210 40% 96%;
+    --primary: 210 40% 96%;
+    --primary-foreground: 222 47% 11%;
+    --secondary: 217 19% 27%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 217 19% 27%;
+    --muted-foreground: 215 16% 57%;
+    --accent: 217 19% 27%;
+    --accent-foreground: 210 40% 96%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 96%;
+    --border: 217 19% 27%;
+    --input: 217 19% 27%;
+    --ring: 217 19% 27%;
+    --radius: 0.375rem;
+    --sidebar-background: 222 47% 11%;
+    --sidebar-foreground: 210 40% 96%;
+    --sidebar-primary: 210 40% 96%;
+    --sidebar-primary-foreground: 222 47% 11%;
+    --sidebar-accent: 217 19% 27%;
+    --sidebar-accent-foreground: 210 40% 96%;
+    --sidebar-border: 217 19% 27%;
+    --sidebar-ring: 217 19% 27%;
+  }
+
+  html,
+  body {
+    @apply bg-slate-950 text-slate-200;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+
+  #root {
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+  }
+}
+
+@layer base {
+  /* Custom scrollbar - thin, dark, subtle */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #475569 #1e293b;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: #1e293b;
+    border-radius: 3px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: #475569;
+    border-radius: 3px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: #64748b;
+  }
+}
+
+@layer components {
+  /* Terminal color classes */
+  .term-white {
+    color: #E3E3E5;
+  }
+  .term-cyan {
+    color: #22d3ee;
+  }
+  .term-red {
+    color: #B02E26;
+  }
+  .term-green {
+    color: #5D8C4A;
+  }
+  .term-yellow {
+    color: #F9FF3E;
+  }
+
+  /* Font utility classes */
+  .font-mono-data {
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .font-ui {
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+}
+
+@layer components {
+  /* CRT Mode overlay */
+  .crt-active {
+    position: relative;
+  }
+
+  .crt-active::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 100;
+    background: repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.08) 0px,
+      rgba(0, 0, 0, 0.08) 2px,
+      transparent 2px,
+      transparent 4px
+    );
+    animation: scanline 0.1s linear infinite;
+  }
+
+  .crt-active::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 101;
+    background: rgba(34, 211, 238, 0.03);
+    mix-blend-mode: screen;
+    animation: crt-flicker 50ms infinite;
+  }
+
+  /* CRT text glow for terminal */
+  .crt-active .terminal-text {
+    text-shadow: 0 0 4px rgba(34, 211, 238, 0.3);
+  }
+
+  /* CRT lighter scanline for POV feed */
+  .crt-active .pov-scanline::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 20;
+    background: repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.04) 0px,
+      rgba(0, 0, 0, 0.04) 2px,
+      transparent 2px,
+      transparent 4px
+    );
+  }
+}

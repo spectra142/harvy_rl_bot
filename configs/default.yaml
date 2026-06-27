@@ -1,0 +1,67 @@
+# RL Minecraft Bot -- Default Training Configuration
+
+environment:
+  host: "localhost"
+  port: 9876
+  max_episode_steps: 6000
+  render_mode: null  # Set to "human" for debug output
+
+training:
+  total_timesteps: 10_000_000
+  device: "auto"  # auto, cpu, cuda
+
+  # PPO hyperparameters
+  learning_rate:
+    initial: 3.0e-4
+    schedule: "linear"  # linear, constant
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  verbose: 1
+
+  # Training stability settings
+  reward_clip: 10.0
+  normalize_observations: true
+  frame_stack: 4
+  noop_bias: 0.01
+
+reconnect:
+  max_retries: 3
+  backoff_base: 1.0
+
+curriculum:
+  enabled: true
+  auto_advance: true
+  advance_after_n_successes: 5
+  switch_threshold: 0.7
+  eval_freq: 10000
+
+callbacks:
+  checkpoint_freq: 100000
+  log_freq: 1000
+  eval_freq: 50000
+  n_eval_episodes: 10
+
+benchmarks:
+  enabled: true
+  eval_freq: 50000
+  n_eval_episodes: 3
+  save_best: true
+
+# Network architecture
+rnd_curiosity:
+  enabled: true
+  reward_scale: 1.0
+  learning_rate: 1.0e-4
+  update_interval: 1
+
+network:
+  features_dim: 256
+  policy_hidden: [256, 128]
+  value_hidden: [256, 128]
