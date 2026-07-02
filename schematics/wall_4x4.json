@@ -1,0 +1,101 @@
+{
+  "name": "wall_4x4",
+  "blocks": [
+    {
+      "dx": 0,
+      "dy": 0,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 1,
+      "dy": 0,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 2,
+      "dy": 0,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 3,
+      "dy": 0,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 0,
+      "dy": 1,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 1,
+      "dy": 1,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 2,
+      "dy": 1,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 3,
+      "dy": 1,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 0,
+      "dy": 2,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 1,
+      "dy": 2,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 2,
+      "dy": 2,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 3,
+      "dy": 2,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 0,
+      "dy": 3,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 1,
+      "dy": 3,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 2,
+      "dy": 3,
+      "dz": 2,
+      "block": "cobblestone"
+    },
+    {
+      "dx": 3,
+      "dy": 3,
+      "dz": 2,
+      "block": "cobblestone"
+    }
+  ]
+}

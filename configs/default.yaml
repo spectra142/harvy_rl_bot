@@ -1,0 +1,63 @@
+# Harvy RL Bot v2 — default configuration
+# IMPORTANT: Replace every placeholder below before running the bot.
+# Look for the text "YOUR_..._HERE" and fill it in with your real info.
+
+environment:
+  # The TCP port the Mineflayer bot listens on for the Python trainer.
+  # You usually do not need to change this unless something else is using port 9876.
+  host: "localhost"
+  port: 9876
+
+  # Minecraft server the bot will join.
+  # Replace with the actual IP address or hostname of your Minecraft server.
+  mc_host: "YOUR_SERVER_IP_OR_HOSTNAME_HERE"
+  mc_port: 25565
+
+  # The in-game username the bot will use when joining the server.
+  mc_username: "YOUR_BOT_USERNAME_HERE"
+
+  # The Minecraft Java version your server is running.
+  # Common examples: "1.21.1", "1.20.6", "1.20.1"
+  mc_version: "YOUR_SERVER_MINECRAFT_VERSION_HERE"
+
+  max_episode_steps: 6000
+  tcp_timeout: 30.0
+  render_mode: null
+
+owner:
+  # Set to YOUR Minecraft username. The bot will only obey chat commands from
+  # this account (and anyone you explicitly trust with 'harvy trust <name>').
+  name: "YOUR_MINECRAFT_USERNAME_HERE"
+  uuid: ""
+
+training:
+  total_timesteps: 5_000_000
+  device: "auto"
+
+  # PPO hyperparameters
+  learning_rate: 3.0e-4
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 4
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  verbose: 1
+
+  checkpoint_freq: 100_000
+
+network:
+  features_dim: 256
+  policy_hidden: [256, 128]
+  value_hidden: [256, 128]
+
+rewards:
+  alive_tick: 0.01
+  damage: -0.5
+  heal: 0.1
+  death: -10.0
+  item_pickup: 0.1
+  clip: 1.0

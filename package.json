@@ -1,0 +1,12 @@
+{
+  "name": "harvy-rl-bot-v2",
+  "version": "2.0.0",
+  "description": "Clean, low-level Minecraft RL bot",
+  "private": true,
+  "scripts": {
+    "start:bot": "cd bot && node index.js",
+    "start:web": "source .venv/bin/activate && uvicorn src.web.main:app --reload --port 8080",
+    "check": "node --check bot/index.js && node --check bot/src/*.js",
+    "test": "bash test.sh"
+  }
+}

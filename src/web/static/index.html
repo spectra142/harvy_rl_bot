@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Harvy Control Panel</title>
+  <style>
+    body { font-family: sans-serif; background: #111; color: #eee; margin: 0; padding: 20px; }
+    h1 { color: #0f0; }
+    .panel { background: #222; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    button { background: #0a0; color: #fff; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; margin-right: 8px; }
+    button:hover { background: #0c0; }
+    input { padding: 6px; border-radius: 4px; border: 1px solid #555; background: #333; color: #fff; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { text-align: left; padding: 6px; border-bottom: 1px solid #444; }
+    .status { font-size: 0.85rem; color: #aaa; }
+  </style>
+</head>
+<body>
+  <h1>Harvy Control Panel</h1>
+
+  <div class="panel">
+    <h2>Auth</h2>
+    <input id="token" type="password" placeholder="web token" value="changeme">
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Status</h2>
+      <div id="status" class="status">Loading...</div>
+    </div>
+
+    <div class="panel">
+      <h2>Commands</h2>
+      <button onclick="sendCmd('stop')">Stop</button>
+      <button onclick="sendCmd('follow')">Follow</button>
+      <button onclick="sendCmd('attack_nearest')">Attack Nearest</button>
+      <button onclick="sendCmd('build_wall')">Build Wall</button>
+      <br><br>
+      <input id="cmdArgs" placeholder="args">
+      <button onclick="sendCustom()">Send Custom</button>
+      <div id="cmdStatus" class="status"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Players</h2>
+    <table>
+      <thead><tr><th>Name</th><th>Threat</th><th>Last Seen</th><th>Actions</th></tr></thead>
+      <tbody id="players"></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Recent Deaths</h2>
+    <table>
+      <thead><tr><th>Time</th><th>Cause</th><th>Killer</th><th>Position</th></tr></thead>
+      <tbody id="deaths"></tbody>
+    </table>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

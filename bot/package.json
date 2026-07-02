@@ -1,0 +1,13 @@
+{
+  "name": "harvy-bot",
+  "version": "2.0.0",
+  "description": "Mineflayer low-level body for Harvy RL",
+  "main": "index.js",
+  "dependencies": {
+    "js-yaml": "^4.1.0",
+    "mineflayer": "^4.20.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "vec3": "^0.1.10",
+    "minecraft-data": "^3.62.0"
+  }
+}
