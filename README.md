@@ -1,5 +1,9 @@
 # Harvy RL Bot
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Node 18+](https://img.shields.io/badge/node-18+-green.svg)](https://nodejs.org/)
+
 A Minecraft reinforcement-learning agent built with Python (Stable-Baselines3 PPO)
 and a Mineflayer bot. Harvy learns to survive, gather, craft, build, and fight in
 Minecraft through a custom Gymnasium environment that talks to the bot over a
@@ -34,7 +38,9 @@ The protocol is **strict request/response**: Python sends exactly one action (or
 `reset`/`set_goal`), the bot executes it and replies with exactly one observation
 on the next physics tick. Reward events (damage, kills, crafts, placements,
 distance moved) accumulate between requests and are flushed on send — no signal
-is ever lost, regardless of how slow the Python side steps.
+is ever lost, regardless of how slow the Python side steps. The connection is
+persistent across episodes (the bot accepts exactly one client); it is only
+re-established if it actually dies.
 
 ## Requirements
 
@@ -70,7 +76,13 @@ If the bot is not opped, everything still works — episodes just continue from
 wherever the bot is (reward baselines are primed so this doesn't corrupt rewards).
 Set `MC_RESET_COMMANDS=0` to disable the reset commands entirely.
 
-### Easiest option: vanilla server
+### Easiest option: Docker
+
+```bash
+docker compose up -d    # offline-mode server, fixed seed, bot pre-opped
+```
+
+### Alternative: vanilla server
 
 1. Download `server.jar` for a supported version (e.g. 26.1) from
    [minecraft.net](https://www.minecraft.net/en-us/download/server).
@@ -211,7 +223,8 @@ python -m pytest tests/ -q
 Covers the observation space, frame stacking, normalizer (including the
 categorical-key embedding crash regression), reward shaping, goal vocabulary
 consistency across all three goal systems, Mission Control, and a fake-bot
-integration test of the request/response wire protocol.
+integration test of the request/response wire protocol (including socket reuse
+across episodes and transparent reconnect after connection loss).
 
 Live smoke tests (need a running server + bot):
 
@@ -220,6 +233,17 @@ python scripts/live_smoke_test.py 40     # random actions + PPO forward pass
 python scripts/skill_live_test.py        # sustains skill_gather_log, checks rewards
 python scripts/train_smoke_test.py       # tiny end-to-end PPO training run
 ```
+
+## 8. Development
+
+```bash
+pip install pre-commit
+pre-commit install        # ruff lint+format, yaml checks on every commit
+python -m pytest tests/ -q
+ruff check src tests
+```
+
+See [CHANGELOG.md](./CHANGELOG.md) for release notes.
 
 ## Project layout
 
