@@ -1,0 +1,32 @@
+# Reproducible Minecraft server for Harvy training.
+#
+#   docker compose up -d
+#   cd src/bot && npm install && MC_HOST=localhost node mineflayer_bot.js
+#   python src/train.py --config configs/default.yaml
+#
+# The server runs offline-mode (the bot has no Mojang account) with the bot
+# pre-opped so episode resets (/clear + /kill) work out of the box.
+services:
+  minecraft:
+    image: itzg/minecraft-server:latest
+    container_name: harvy-mc-server
+    environment:
+      EULA: "TRUE"
+      TYPE: VANILLA
+      VERSION: "1.21.1"
+      ONLINE_MODE: "FALSE"
+      DIFFICULTY: normal
+      SPAWN_PROTECTION: 0
+      OPS: "harvy"
+      MAX_MEMORY: 4G
+      # Deterministic-ish training world: fixed seed, structures on.
+      SEED: "harvy-training"
+      GENERATE_STRUCTURES: "true"
+    ports:
+      - "25565:25565"
+    volumes:
+      - mc-data:/data
+    restart: unless-stopped
+
+volumes:
+  mc-data:

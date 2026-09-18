@@ -32,6 +32,18 @@ class MissionControlEnvWrapper(gym.Wrapper):
         self.manager = manager
 
     def reset(self, **kwargs):
+        # A pending goal reset requested mid-episode is applied here if the
+        # episode ended before step() could consume it (SB3 auto-resets
+        # after done, which is the correct episode boundary).
+        goal = None
+        with self.manager._lock:
+            if self.manager.pending_reset is not None:
+                goal = self.manager.pending_reset
+                self.manager.pending_reset = None
+        if goal is not None:
+            options = dict(kwargs.pop("options", None) or {})
+            options["goal"] = goal
+            kwargs["options"] = options
         obs, info = self.env.reset(**kwargs)
         self._publish_state(obs, info)
         return obs, info
@@ -46,6 +58,13 @@ class MissionControlEnvWrapper(gym.Wrapper):
         obs, reward, terminated, truncated, info = self.env.step(action)
         self._publish_state(obs, info)
 
+        # Never swallow a terminal transition: SB3 needs the real reward and
+        # done flags to close the episode and bootstrap the value function
+        # correctly. A pending goal reset survives and is applied by the
+        # reset() SB3 issues next.
+        if terminated or truncated:
+            return obs, reward, terminated, truncated, info
+
         goal = None
         with self.manager._lock:
             if self.manager.pending_reset is not None:
@@ -53,6 +72,9 @@ class MissionControlEnvWrapper(gym.Wrapper):
                 self.manager.pending_reset = None
 
         if goal is not None:
+            # Mid-episode manual reset: the current step's transition is
+            # discarded by definition (the user interrupted it), but the new
+            # episode starts cleanly with the requested goal.
             obs, info = self.env.reset(options={"goal": goal})
             self._publish_state(obs, info)
             return obs, 0.0, False, False, info

@@ -74,23 +74,39 @@ def _fake_observation(goal="survive", step=0):
 class FakeBotServer:
     """Minimal fake of mineflayer_bot.js: replies with exactly one
     observation per action/reset line received, and ignores
-    server_command lines (no reply)."""
+    server_command lines (no reply).
+
+    Accepts connections sequentially (like the real bot: one client at a
+    time, but a new client may connect after the previous one goes away).
+    """
 
     def __init__(self):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server.bind(("127.0.0.1", 0))
         self.server.listen(1)
+        self.server.settimeout(0.5)
         self.port = self.server.getsockname()[1]
         self.received = []
+        self.connection_count = 0
         self._conn = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
 
     def _serve(self):
-        conn, _ = self.server.accept()
-        self._conn = conn
+        while not self._stop.is_set():
+            try:
+                conn, _ = self.server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            self._conn = conn
+            self.connection_count += 1
+            self._handle(conn)
+
+    def _handle(self, conn):
         conn.settimeout(5.0)
         buffer = b""
         step = 0
@@ -118,11 +134,23 @@ class FakeBotServer:
                     step += 1
                 goal = msg.get("goal", "survive")
                 obs = _fake_observation(goal=goal, step=step)
-                conn.sendall((json.dumps(obs) + "\n").encode())
+                try:
+                    conn.sendall((json.dumps(obs) + "\n").encode())
+                except OSError:
+                    break
         try:
             conn.close()
         except OSError:
             pass
+
+    def drop_client(self):
+        """Close only the current client connection (keeps listening)."""
+        if self._conn is not None:
+            try:
+                self._conn.shutdown(socket.SHUT_RDWR)
+                self._conn.close()
+            except OSError:
+                pass
 
     def close(self):
         self._stop.set()
@@ -146,15 +174,19 @@ def fake_bot():
     server.close()
 
 
-def test_request_response_protocol(fake_bot):
-    """reset() and each step() must yield exactly one fresh observation."""
-    env = MinecraftEnv(
+def _make_env(port, max_episode_steps=10):
+    return MinecraftEnv(
         host="127.0.0.1",
-        port=fake_bot.port,
-        max_episode_steps=10,
+        port=port,
+        max_episode_steps=max_episode_steps,
         normalize_observations=False,
         frame_stack=1,
     )
+
+
+def test_request_response_protocol(fake_bot):
+    """reset() and each step() must yield exactly one fresh observation."""
+    env = _make_env(fake_bot.port)
     obs, info = env.reset(options={"goal": "explore"})
     assert info["goal"] == "explore"
 
@@ -174,13 +206,7 @@ def test_request_response_protocol(fake_bot):
 
 def test_server_command_does_not_desync(fake_bot):
     """A server_command between steps must not shift the obs stream."""
-    env = MinecraftEnv(
-        host="127.0.0.1",
-        port=fake_bot.port,
-        max_episode_steps=10,
-        normalize_observations=False,
-        frame_stack=1,
-    )
+    env = _make_env(fake_bot.port)
     env.reset(options={"goal": "survive"})
     assert env.send_text_command("time set day") is True
     obs, reward, terminated, truncated, info = env.step(1)
@@ -189,16 +215,55 @@ def test_server_command_does_not_desync(fake_bot):
 
 
 def test_connection_loss_terminates(fake_bot):
-    env = MinecraftEnv(
-        host="127.0.0.1",
-        port=fake_bot.port,
-        max_episode_steps=10,
-        normalize_observations=False,
-        frame_stack=1,
-    )
+    env = _make_env(fake_bot.port)
     env.reset(options={"goal": "survive"})
     fake_bot.close()  # kill the "bot"
     obs, reward, terminated, truncated, info = env.step(1)
     assert terminated is True
     assert info["termination_reason"] == "connection_lost"
     env.close()
+
+
+def test_reset_reuses_socket_across_episodes(fake_bot):
+    """Episodes must share ONE connection.
+
+    The real bot accepts exactly one Python client and destroys extras, so
+    a per-episode reconnect can race the server's disconnect handling and
+    kill the fresh connection. Regression test: two full episodes over a
+    single accepted connection.
+    """
+    env = _make_env(fake_bot.port)
+
+    env.reset(options={"goal": "explore"})
+    first_sock = env.sock
+    env.step(1)
+
+    env.reset(options={"goal": "survive"})
+    assert env.sock is first_sock, "reset() must not reconnect a live socket"
+    obs, reward, terminated, truncated, info = env.step(1)
+    assert not terminated
+    assert info["resources_collected"] == 1  # episode stats reset by the bot
+
+    env.close()
+    assert fake_bot.connection_count == 1
+
+
+def test_reconnects_after_connection_loss(fake_bot):
+    """A dead socket is re-established transparently on the next reset."""
+    env = _make_env(fake_bot.port)
+    env.reset(options={"goal": "survive"})
+    env.step(1)
+
+    fake_bot.drop_client()  # bot process "restarted"; listener still up
+
+    obs, reward, terminated, truncated, info = env.step(1)
+    assert terminated is True
+    assert info["termination_reason"] == "connection_lost"
+
+    obs, info = env.reset(options={"goal": "survive"})
+    assert info["goal"] == "survive"  # reconnected, fresh episode
+    obs, reward, terminated, truncated, info = env.step(1)
+    assert not terminated
+
+    env.close()
+    assert fake_bot.connection_count == 2

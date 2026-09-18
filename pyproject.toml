@@ -1,0 +1,14 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# Enforced in CI via `--select E9,F` (syntax errors + pyflakes).
+# The wider set below is for local/pre-commit use as the codebase
+# converges on it.
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

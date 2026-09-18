@@ -24,6 +24,66 @@ def test_reward_clipping():
     assert reward == pytest.approx(-10.0)
 
 
+def test_reward_clip_is_configurable():
+    """reward_clip exposes the final clamp so death scale is a choice."""
+    calc = RewardCalculator(reward_clip=100.0)
+    reward = calc.compute(_make_obs(), {"death": 1}, action_idx=1, danger_level=0.0)
+    assert reward == pytest.approx(-100.0)
+
+
+def test_set_goal_canonicalizes_legacy_aliases():
+    """Legacy goal names must resolve to canonical GOAL_REWARDS keys,
+    matching what the observation pipeline reports as goal_id."""
+    calc = RewardCalculator(goal="punch_wood")
+    assert calc.goal == "gather_logs"
+
+    calc.set_goal("mine_stone")
+    assert calc.goal == "gather_stone"
+
+    calc.set_goal("full_survival")
+    assert calc.goal == "survive"
+
+
+def test_legacy_alias_goal_gets_shaping():
+    """A legacy-named goal must produce identical shaping to the canonical one."""
+    inv = np.zeros((INVENTORY_SIZE,), dtype=np.float32)
+
+    def run(calc):
+        obs = {
+            "self_health": np.array([20.0], dtype=np.float32),
+            "self_food": np.array([20.0], dtype=np.float32),
+            "inventory": inv.copy(),
+            "self_held_item_id": np.array([0.0], dtype=np.float32),
+        }
+        calc.reset(obs)
+        inv2 = inv.copy()
+        inv2[ITEM_NAME_TO_ID["oak_log"]] = 3.0
+        obs["inventory"] = inv2
+        return calc.compute(obs, {"alive_tick": 1}, action_idx=1, danger_level=0.5)
+
+    assert run(RewardCalculator(goal="punch_wood")) == pytest.approx(
+        run(RewardCalculator(goal="gather_logs"))
+    )
+
+
+def test_reward_shaping_adds_per_signal_bonus():
+    """Curriculum reward_shaping entries matching a signal are additive."""
+    calc = RewardCalculator()
+    calc.set_reward_shaping({"mob_killed": 20.0})
+    reward = calc.compute(_make_obs(), {"mob_killed": 1}, action_idx=1, danger_level=0.5)
+    assert reward == pytest.approx(5.0 + 20.0)  # base 5.0/kill + shaping 20.0
+
+
+def test_reward_shaping_ignores_unknown_keys(caplog):
+    """Unknown shaping keys must be ignored (and logged), never crash."""
+    calc = RewardCalculator()
+    calc.set_reward_shaping({"not_a_signal": 99.0})
+    reward = calc.compute(
+        _make_obs(), {"alive_tick": 1}, action_idx=1, danger_level=0.5
+    )
+    assert reward == pytest.approx(0.01)
+
+
 def test_alive_tick_reward():
     calc = RewardCalculator()
     reward = calc.compute(

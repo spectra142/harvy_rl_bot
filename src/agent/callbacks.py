@@ -31,11 +31,16 @@ class CurriculumCallback(BaseCallback):
         self.switch_threshold = switch_threshold
         self._episodes_recorded = 0
 
-    def _on_training_start(self) -> None:
+    def _push_stage(self) -> None:
+        """Push the current stage's goal AND reward shaping into the env."""
         stage = self.manager.current_stage
+        self.training_env.env_method("set_goal", stage.goal)
+        self.training_env.env_method("set_reward_shaping", stage.reward_shaping)
         self.logger.record("curriculum/stage", self.manager.current_stage_idx)
         self.logger.record("curriculum/stage_name", stage.name)
-        self.training_env.env_method("set_goal", stage.goal)
+
+    def _on_training_start(self) -> None:
+        self._push_stage()
 
     def _on_rollout_end(self) -> None:
         # Record only NEW episodes into the manager (it decides advancement).
@@ -51,10 +56,7 @@ class CurriculumCallback(BaseCallback):
         for r in fresh:
             self.manager.record_episode(r > self.switch_threshold, r)
 
-        stage = self.manager.current_stage
-        self.training_env.env_method("set_goal", stage.goal)
-        self.logger.record("curriculum/stage", self.manager.current_stage_idx)
-        self.logger.record("curriculum/stage_name", stage.name)
+        self._push_stage()
 
 
 class AuxStateCallback(BaseCallback):
