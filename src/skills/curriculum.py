@@ -21,13 +21,18 @@ class CurriculumStage:
 class CurriculumManager:
     """Manages curriculum learning from simple to complex tasks."""
 
+    # NOTE on reward_shaping keys: they must be bot reward-signal names
+    # (see env.rewards.KNOWN_SIGNAL_KEYS -- e.g. "mob_killed", "item_mined",
+    # "block_placed", "damage_taken"). The CurriculumCallback pushes them
+    # into RewardCalculator as additive per-signal weights; anything else
+    # is logged and ignored instead of silently doing nothing.
     DEFAULT_CURRICULUM = [
         CurriculumStage(
             name="basic_movement",
             goal="explore",
             max_episode_steps=200,
             success_threshold=0.8,
-            reward_shaping={"distance_reward": 1.0, "fall_penalty": -5.0},
+            reward_shaping={"distance_moved": 1.0, "damage_taken": -5.0},
             description="Learn to walk, turn, jump, and look around",
         ),
         CurriculumStage(
@@ -35,7 +40,7 @@ class CurriculumManager:
             goal="gather_logs",
             max_episode_steps=500,
             success_threshold=0.7,
-            reward_shaping={"log_reward": 2.0, "pickup_reward": 1.0},
+            reward_shaping={"item_mined": 2.0},
             description="Find and punch trees to collect logs",
         ),
         CurriculumStage(
@@ -43,11 +48,7 @@ class CurriculumManager:
             goal="craft_pickaxe",
             max_episode_steps=500,
             success_threshold=0.7,
-            reward_shaping={
-                "craft_reward": 5.0,
-                "plank_reward": 1.0,
-                "stick_reward": 1.0,
-            },
+            reward_shaping={"item_crafted": 5.0},
             description="Craft a crafting table and wooden pickaxe",
         ),
         CurriculumStage(
@@ -55,7 +56,7 @@ class CurriculumManager:
             goal="gather_stone",
             max_episode_steps=1000,
             success_threshold=0.6,
-            reward_shaping={"stone_reward": 1.0, "pickaxe_bonus": 3.0},
+            reward_shaping={"item_mined": 1.0, "item_crafted": 3.0},
             description="Mine cobblestone with a pickaxe",
         ),
         CurriculumStage(
@@ -63,7 +64,7 @@ class CurriculumManager:
             goal="eat_food",
             max_episode_steps=500,
             success_threshold=0.6,
-            reward_shaping={"kill_reward": 10.0, "hit_reward": 2.0},
+            reward_shaping={"mob_killed": 10.0, "damage_taken": -1.0},
             description="Fight and kill passive mobs (cows, pigs)",
         ),
         CurriculumStage(
@@ -71,11 +72,7 @@ class CurriculumManager:
             goal="fight_hostile",
             max_episode_steps=1000,
             success_threshold=0.5,
-            reward_shaping={
-                "kill_reward": 20.0,
-                "hit_reward": 5.0,
-                "health_penalty": -2.0,
-            },
+            reward_shaping={"mob_killed": 20.0, "damage_taken": -2.0},
             description="Fight and kill hostile mobs (zombies, skeletons)",
         ),
         CurriculumStage(
@@ -83,11 +80,7 @@ class CurriculumManager:
             goal="build_shelter",
             max_episode_steps=1000,
             success_threshold=0.5,
-            reward_shaping={
-                "block_placed": 5.0,
-                "shelter_complete": 50.0,
-                "wasted_block": -1.0,
-            },
+            reward_shaping={"block_placed": 5.0, "shelter_complete": 50.0},
             description="Build a 5x5 enclosed shelter",
         ),
         CurriculumStage(
@@ -95,11 +88,7 @@ class CurriculumManager:
             goal="survive_first_night",
             max_episode_steps=2000,
             success_threshold=0.6,
-            reward_shaping={
-                "survive_reward": 1.0,
-                "mob_avoidance": 2.0,
-                "shelter_bonus": 10.0,
-            },
+            reward_shaping={"alive_tick": 0.5, "shelter_complete": 10.0},
             description="Survive from spawn through the first night",
         ),
         CurriculumStage(
@@ -107,7 +96,7 @@ class CurriculumManager:
             goal="gather_iron",
             max_episode_steps=3000,
             success_threshold=0.4,
-            reward_shaping={"iron_reward": 5.0, "coal_reward": 2.0, "depth_bonus": 1.0},
+            reward_shaping={"item_mined": 5.0},
             description="Find and mine iron ore deep underground",
         ),
         CurriculumStage(
@@ -115,7 +104,7 @@ class CurriculumManager:
             goal="survive",
             max_episode_steps=6000,
             success_threshold=0.5,
-            reward_shaping={"composite_score": 1.0},
+            reward_shaping={},
             description="Full open-world survival episode",
         ),
         CurriculumStage(
@@ -123,11 +112,7 @@ class CurriculumManager:
             goal="fight_hostile",
             max_episode_steps=2000,
             success_threshold=0.4,
-            reward_shaping={
-                "player_kill": 50.0,
-                "player_hit": 10.0,
-                "survival_bonus": 5.0,
-            },
+            reward_shaping={"player_killed": 50.0, "mob_killed": 5.0},
             description="Fight and defeat other players/bots in PvP",
         ),
     ]
