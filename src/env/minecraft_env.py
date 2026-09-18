@@ -105,6 +105,7 @@ class MinecraftEnv(gym.Env):
                 self.sock.close()
             except OSError:
                 pass
+            self.sock = None
         max_retries = 3
         backoff = 1.0
         for attempt in range(max_retries):
@@ -130,6 +131,21 @@ class MinecraftEnv(gym.Env):
                     )
                     raise
 
+    def _mark_socket_dead(self) -> None:
+        """Tear down the current socket so the next reset() reconnects.
+
+        Called whenever a send/receive fails. We never try to resurrect a
+        half-open TCP connection -- a clean reconnect is the only recovery
+        that keeps the strict request/response protocol aligned.
+        """
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+            self.sock = None
+        self._recv_buffer = b""
+
     def _send_action(self, action_idx: int) -> None:
         """Send action command to bot."""
         if not self.sock:
@@ -141,6 +157,7 @@ class MinecraftEnv(gym.Env):
                 self.sock.sendall(msg.encode("utf-8"))
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
             logger.error(f"Failed to send action: {e}")
+            self._mark_socket_dead()
 
     def _receive_observation(self) -> Optional[dict]:
         """Receive one observation from the bot.
@@ -156,6 +173,8 @@ class MinecraftEnv(gym.Env):
             while True:
                 data = self.sock.recv(65536)
                 if not data:
+                    # Orderly shutdown from the bot side.
+                    self._mark_socket_dead()
                     return None
                 self._recv_buffer += data
                 if b"\n" in self._recv_buffer:
@@ -174,6 +193,7 @@ class MinecraftEnv(gym.Env):
                         return latest
         except (socket.timeout, ConnectionResetError, OSError) as e:
             logger.error(f"Failed to receive observation: {e}")
+            self._mark_socket_dead()
             return None
 
     def reset(
@@ -187,26 +207,34 @@ class MinecraftEnv(gym.Env):
         self.current_step = 0
         self.episode_reward = 0.0
 
-        # Connect or reconnect to bot
-        try:
-            self._connect()
-        except Exception:
-            # Return dummy observation if bot not available
-            obs = self._dummy_observation()
-            if self.frame_stacker is not None:
-                obs = self.frame_stacker.reset(obs)
-            if self.normalizer is not None:
-                self.normalizer.update(obs)
-                obs = self.normalizer.normalize(obs)
-            info = {
-                "goal": self.goal,
-                "health": 20.0,
-                "food": 20.0,
-                "position": [0.0, 64.0, 0.0],
-                "held_item": "",
-                "inventory_counts": {},
-            }
-            return obs, info
+        # Reuse the socket across episodes. The bot accepts exactly one
+        # Python client and rejects extras, so a close+reconnect per episode
+        # can race the server's disconnect handling and get our fresh
+        # connection destroyed. Only reconnect when the socket is actually
+        # dead (first reset, or after a connection loss).
+        if self.sock is None:
+            try:
+                self._connect()
+            except Exception:
+                # Return dummy observation if bot not available
+                obs = self._dummy_observation()
+                # Prime reward baselines even on the dummy path so the first
+                # real episode after a bot outage doesn't see a phantom delta.
+                self.reward_calculator.reset(obs)
+                if self.frame_stacker is not None:
+                    obs = self.frame_stacker.reset(obs)
+                if self.normalizer is not None:
+                    self.normalizer.update(obs)
+                    obs = self.normalizer.normalize(obs)
+                info = {
+                    "goal": self.goal,
+                    "health": 20.0,
+                    "food": 20.0,
+                    "position": [0.0, 64.0, 0.0],
+                    "held_item": "",
+                    "inventory_counts": {},
+                }
+                return obs, info
 
         # Pick goal: autonomous generator, explicit option, or fixed default
         if self.autonomous and self.goal_generator is not None:
@@ -217,14 +245,14 @@ class MinecraftEnv(gym.Env):
         else:
             goal = self.goal
         self.goal = goal
-        self.reward_calculator.goal = goal
+        self.reward_calculator.set_goal(goal)
 
         reset_cmd = {"action": "reset", "goal": goal}
         try:
             with self._send_lock:
                 self.sock.sendall((json.dumps(reset_cmd) + "\n").encode("utf-8"))
         except OSError:
-            pass
+            self._mark_socket_dead()
 
         # Wait for first observation
         raw_obs = self._receive_observation()
@@ -246,7 +274,7 @@ class MinecraftEnv(gym.Env):
             new_goal = self.goal_generator.select_goal(state)
             if new_goal != self.goal:
                 self.goal = new_goal
-                self.reward_calculator.goal = new_goal
+                self.reward_calculator.set_goal(new_goal)
                 # Update the goal WITHOUT a second world reset (avoids
                 # killing/respawning the bot twice per episode).
                 goal_cmd = {"action": "set_goal", "goal": new_goal}
@@ -254,7 +282,7 @@ class MinecraftEnv(gym.Env):
                     with self._send_lock:
                         self.sock.sendall((json.dumps(goal_cmd) + "\n").encode("utf-8"))
                 except OSError:
-                    pass
+                    self._mark_socket_dead()
                 # Receive fresh observation for the new goal
                 raw_obs = self._receive_observation()
 
@@ -298,7 +326,8 @@ class MinecraftEnv(gym.Env):
         raw_obs = self._receive_observation()
 
         if raw_obs is None:
-            # Connection lost -- end episode
+            # Connection lost -- end episode. The socket is already marked
+            # dead, so the next reset() reconnects transparently.
             obs = self._dummy_observation()
             if self.frame_stacker is not None:
                 obs = self.frame_stacker.step(obs)
@@ -408,7 +437,15 @@ class MinecraftEnv(gym.Env):
     def set_goal(self, goal: str) -> None:
         """Update the environment's active goal (used by curriculum callbacks)."""
         self.goal = goal
-        self.reward_calculator.goal = goal
+        self.reward_calculator.set_goal(goal)
+
+    def set_reward_shaping(self, shaping: Optional[Dict[str, float]]) -> None:
+        """Install additive per-signal reward shaping.
+
+        Driven by CurriculumCallback in guided mode so each curriculum
+        stage's shaping actually reaches the reward function.
+        """
+        self.reward_calculator.set_reward_shaping(shaping)
 
     def send_text_command(self, command: str) -> bool:
         """Send an out-of-band server command to the bot (no obs response).
@@ -425,6 +462,7 @@ class MinecraftEnv(gym.Env):
             return True
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
             logger.error(f"Failed to send server command: {e}")
+            self._mark_socket_dead()
             return False
 
     def save_aux_state(self, prefix: str) -> None:

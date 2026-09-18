@@ -10,9 +10,29 @@ import numpy as np
 from typing import Dict, Any, Optional
 
 from .knowledge_base import MinecraftKnowledgeBase
-from .observation import ITEM_NAME_TO_ID, ITEM_ID_TO_NAME
+from .observation import ITEM_NAME_TO_ID, ITEM_ID_TO_NAME, LEGACY_GOAL_ALIASES
 
 logger = logging.getLogger(__name__)
+
+# Reward-signal keys the bot actually sends. Curriculum reward_shaping
+# entries are matched against these; anything else is logged and ignored
+# instead of silently doing nothing.
+KNOWN_SIGNAL_KEYS = frozenset(
+    {
+        "alive_tick",
+        "death",
+        "damage_taken",
+        "mob_killed",
+        "player_killed",
+        "item_mined",
+        "item_crafted",
+        "block_placed",
+        "item_lost",
+        "food_eaten",
+        "shelter_complete",
+        "distance_moved",
+    }
+)
 
 
 class RewardCalculator:
@@ -49,11 +69,14 @@ class RewardCalculator:
         noop_bias: float = 0.01,
         knowledge_base: Optional[MinecraftKnowledgeBase] = None,
         goal: Optional[str] = None,
+        reward_clip: float = 10.0,
     ):
         self.skill_module = skill_module
         self.noop_bias = noop_bias
         self.knowledge_base = knowledge_base
-        self.goal = goal
+        self.reward_clip = float(reward_clip)
+        self.goal: Optional[str] = None
+        self.set_goal(goal)
         self.prev_health = 20.0
         self.prev_food = 20.0
         self.prev_inventory_sum = 0.0
@@ -61,6 +84,46 @@ class RewardCalculator:
         self._prev_held_item: Optional[str] = None
         # Track per-item counts for goal-specific reward shaping
         self._prev_inventory_counts: Dict[str, float] = {}
+        # Additive per-signal shaping installed by the guided curriculum.
+        self._shaping: Dict[str, float] = {}
+        self._warned_shaping_keys = False
+
+    def set_goal(self, goal: Optional[str]) -> None:
+        """Set the active goal, canonicalizing legacy aliases.
+
+        The observation pipeline resolves aliases (e.g. "punch_wood" ->
+        "gather_logs") through GOAL_TO_ID; the reward side must agree or
+        goal shaping silently vanishes whenever a legacy name arrives via
+        mission control or a curriculum stage.
+        """
+        if goal is not None:
+            canonical = LEGACY_GOAL_ALIASES.get(goal, goal)
+            if canonical != goal:
+                logger.info("Canonicalized legacy goal '%s' -> '%s'", goal, canonical)
+            goal = canonical
+            if goal not in self.GOAL_REWARDS:
+                logger.debug(
+                    "Goal '%s' has no GOAL_REWARDS entry; base rewards only", goal
+                )
+        self.goal = goal
+
+    def set_reward_shaping(self, shaping: Optional[Dict[str, float]]) -> None:
+        """Install additive per-signal reward shaping (guided curriculum).
+
+        Keys matching a bot reward-signal name (see KNOWN_SIGNAL_KEYS) add
+        ``weight * count`` to every step's reward. Unknown keys are logged
+        once and ignored -- dead config is now loud instead of silent.
+        """
+        self._shaping = dict(shaping or {})
+        unknown = [k for k in self._shaping if k not in KNOWN_SIGNAL_KEYS]
+        if unknown and not self._warned_shaping_keys:
+            logger.warning(
+                "reward_shaping keys %s do not match any reward signal and are "
+                "ignored. Valid keys: %s",
+                unknown,
+                sorted(KNOWN_SIGNAL_KEYS),
+            )
+            self._warned_shaping_keys = True
 
     def reset(self, obs: Optional[dict] = None):
         """Reset per-episode state.
@@ -193,6 +256,11 @@ class RewardCalculator:
         if self.goal and self.goal in self.GOAL_REWARDS:
             reward += self._compute_goal_reward(self.goal, obs, reward_signal)
 
+        # ----- Curriculum stage shaping (additive, per-signal) -----
+        for key, weight in self._shaping.items():
+            if key in KNOWN_SIGNAL_KEYS:
+                reward += reward_signal.get(key, 0) * weight
+
         # Update per-item inventory tracking (after goal shaping used it)
         self._prev_inventory_counts = self._inventory_counts_from_obs(obs)
 
@@ -200,7 +268,7 @@ class RewardCalculator:
         if action_idx == 0 and danger_level < 0.1:
             reward -= self.noop_bias
 
-        return float(np.clip(reward, -10.0, 10.0))
+        return float(np.clip(reward, -self.reward_clip, self.reward_clip))
 
     def _compute_goal_reward(
         self,
