@@ -101,6 +101,10 @@ class BenchmarkSuite:
         self.results_history: List[Dict[str, Any]] = self._load_history()
         self.best_scores: Dict[str, float] = {name: 0.0 for name in self.BENCHMARKS}
         self._load_best_scores()
+        # Set by run_all() when any benchmark beat its previous best; read by
+        # is_best_checkpoint() (run_all updates best_scores itself, so a naive
+        # "score > best" check afterwards would always be False).
+        self._last_run_had_new_best: bool = False
 
     def _load_history(self) -> List[Dict[str, Any]]:
         """Load historical benchmark results from disk."""
@@ -215,6 +219,12 @@ class BenchmarkSuite:
         """
         obs: Any
         info: Dict[str, Any]
+        # Benchmarks may need longer episodes than training (e.g.
+        # survive_10min needs 12000 steps > the usual 6000-step cap), so
+        # raise the episode cap on this dedicated eval env.
+        raw_env = getattr(env, "unwrapped", env)
+        if hasattr(raw_env, "max_episode_steps"):
+            raw_env.max_episode_steps = max(raw_env.max_episode_steps, cfg["max_steps"])
         obs, info = env.reset(options={"goal": cfg["goal"]})
         done = False
         steps = 0
@@ -248,17 +258,19 @@ class BenchmarkSuite:
             if info.get("pickaxe_crafted", False):
                 metrics["pickaxe_crafted"] = True
 
-            # Check inventory from observation
-            inv: Any = obs.get("inventory", {}) if isinstance(obs, dict) else {}
-            if hasattr(inv, "get"):
-                metrics["max_inventory_logs"] = max(
-                    metrics["max_inventory_logs"],
-                    inv.get("oak_log", 0) + inv.get("birch_log", 0),
-                )
-                metrics["max_inventory_stone"] = max(
-                    metrics["max_inventory_stone"],
-                    inv.get("cobblestone", 0),
-                )
+            # Item counts come from the info dict (a name->count dict), NOT
+            # from obs["inventory"] (which is a fixed-size numpy vector).
+            inv: Dict[str, Any] = info.get("inventory_counts", {}) or {}
+            log_count = sum(
+                float(v) for k, v in inv.items() if k.endswith("_log")
+            )
+            metrics["max_inventory_logs"] = max(
+                metrics["max_inventory_logs"], log_count
+            )
+            metrics["max_inventory_stone"] = max(
+                metrics["max_inventory_stone"],
+                float(inv.get("cobblestone", 0)),
+            )
 
         # Calculate score based on benchmark
         score, success, raw_value = self._calculate_score(
@@ -352,6 +364,7 @@ class BenchmarkSuite:
             failed).
         """
         results: Dict[str, Optional[BenchmarkResult]] = {}
+        self._last_run_had_new_best = False
         for name in self.BENCHMARKS:
             try:
                 result = self.run_benchmark(name, env, model, n_episodes)
@@ -361,6 +374,8 @@ class BenchmarkSuite:
                 # Save if best
                 if result.score > self.best_scores[name]:
                     self.best_scores[name] = result.score
+                    self._last_run_had_new_best = True
+                    result.details["is_new_best"] = True
                     logger.info("  NEW BEST for %s: %.3f", name, result.score)
 
                 # Record result
@@ -396,18 +411,13 @@ class BenchmarkSuite:
         }
 
     def is_best_checkpoint(self, results: Dict[str, Optional[BenchmarkResult]]) -> bool:
-        """Check if these results beat the previous best on any benchmark.
+        """Check if the most recent run_all() beat any previous best.
 
-        Args:
-            results: Mapping of benchmark name to result.
-
-        Returns:
-            True if at least one benchmark score is a new best.
+        ``run_all`` updates ``best_scores`` itself, so this must rely on the
+        flag recorded during that run rather than re-comparing scores (which
+        would always be False).
         """
-        for name, result in results.items():
-            if result is not None and result.score > self.best_scores.get(name, 0):
-                return True
-        return False
+        return self._last_run_had_new_best
 
     def get_benchmark_descriptions(self) -> Dict[str, str]:
         """Return a mapping of benchmark names to their descriptions."""

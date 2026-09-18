@@ -29,6 +29,7 @@ class SelfEmbedding(nn.Module):
 
     def forward(self, observations: dict) -> torch.Tensor:
         item_ids = observations["self_held_item_id"].squeeze(-1).long()
+        item_ids = item_ids.clamp(0, self.item_embedding.num_embeddings - 1)
         item_emb = self.item_embedding(item_ids)
         stats = torch.cat(
             [
@@ -78,6 +79,7 @@ class EntityEncoder(nn.Module):
 
     def forward(self, observations: dict) -> torch.Tensor:
         type_ids = observations["entity_type_ids"].long()
+        type_ids = type_ids.clamp(0, self.type_embedding.num_embeddings - 1)
         distances = observations["entity_distances"]
         healths = observations["entity_healths"]
         hostiles = observations["entity_hostiles"]
@@ -105,6 +107,7 @@ class DangerBlockEncoder(nn.Module):
 
     def forward(self, observations: dict) -> torch.Tensor:
         type_ids = observations["danger_block_types"].long()
+        type_ids = type_ids.clamp(0, self.type_embedding.num_embeddings - 1)
         positions = observations["danger_block_positions"]
         distances = observations["danger_block_distances"]
 
@@ -210,6 +213,7 @@ class MinecraftFeatureExtractor(BaseFeaturesExtractor):
         voxel_emb = self.voxel_encoder(observations["voxel_grid"])
         env_emb = self.env_encoder(observations)
         goal_ids = observations["goal_id"].squeeze(-1).long()
+        goal_ids = goal_ids.clamp(0, self.goal_embedding.num_embeddings - 1)
         goal_emb = self.goal_embedding(goal_ids)
 
         combined = torch.cat(

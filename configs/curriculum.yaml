@@ -2,7 +2,7 @@
 curriculum:
   stages:
     - name: "basic_movement"
-      goal: "basic_movement"
+      goal: "explore"
       max_episode_steps: 200
       success_threshold: 0.8
       reward_shaping:
@@ -11,7 +11,7 @@ curriculum:
       description: "Learn to walk, turn, jump, and look around"
       
     - name: "punch_wood"
-      goal: "punch_wood"
+      goal: "gather_logs"
       max_episode_steps: 500
       success_threshold: 0.7
       reward_shaping:
@@ -30,7 +30,7 @@ curriculum:
       description: "Craft a crafting table and wooden pickaxe"
       
     - name: "mine_stone"
-      goal: "mine_stone"
+      goal: "gather_stone"
       max_episode_steps: 1000
       success_threshold: 0.6
       reward_shaping:
@@ -39,7 +39,7 @@ curriculum:
       description: "Mine cobblestone with a pickaxe"
       
     - name: "fight_passive"
-      goal: "fight_passive"
+      goal: "eat_food"
       max_episode_steps: 500
       success_threshold: 0.6
       reward_shaping:
@@ -78,7 +78,7 @@ curriculum:
       description: "Survive from spawn through the first night"
       
     - name: "mine_iron"
-      goal: "mine_iron"
+      goal: "gather_iron"
       max_episode_steps: 3000
       success_threshold: 0.4
       reward_shaping:
@@ -88,7 +88,7 @@ curriculum:
       description: "Find and mine iron ore deep underground"
       
     - name: "full_survival"
-      goal: "full_survival"
+      goal: "survive"
       max_episode_steps: 6000
       success_threshold: 0.5
       reward_shaping:
@@ -96,7 +96,7 @@ curriculum:
       description: "Full open-world survival episode"
       
     - name: "pvp_combat"
-      goal: "pvp_combat"
+      goal: "fight_hostile"
       max_episode_steps: 2000
       success_threshold: 0.4
       reward_shaping:

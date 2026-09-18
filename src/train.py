@@ -33,6 +33,7 @@ from agent.callbacks import (
     MetricsLoggerCallback,
     SkillEvaluationCallback,
     BenchmarkEvaluationCallback,
+    AuxStateCallback,
 )
 from skills.curriculum import CurriculumManager
 from skills.autonomous_curriculum import AutonomousCurriculum
@@ -82,9 +83,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--autonomous",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Let Harvy pick its own goals and explore (default: True)",
+        help="Let Harvy pick its own goals and explore (default: True; use --no-autonomous or --guided to disable)",
     )
     parser.add_argument(
         "--guided",
@@ -206,6 +207,18 @@ def train(args: argparse.Namespace) -> None:
     if args.resume:
         logger.info(f"Resuming from checkpoint: {args.resume}")
         model = load_agent(args.resume, env, device=device)
+        # Restore auxiliary state saved alongside the checkpoint
+        # (observation normalizer stats, RND predictor) so the observation
+        # and intrinsic-reward distributions don't silently shift.
+        prefix = args.resume[:-4] if args.resume.endswith(".zip") else args.resume
+        raw_env = getattr(env, "unwrapped", env)
+        if hasattr(raw_env, "load_aux_state"):
+            raw_env.load_aux_state(prefix)
+        if args.autonomous:
+            auto_state_path = output_dir / "harvy_autonomous_state.json"
+            if auto_state_path.exists():
+                goal_generator.load_progress(str(auto_state_path))
+                logger.info(f"Restored autonomous goal state from {auto_state_path}")
 
     if model is None:
         # Create new agent
@@ -233,13 +246,19 @@ def train(args: argparse.Namespace) -> None:
     # Setup callbacks
     callbacks = []
 
-    # Checkpoint callback -- save every N steps
+    # Checkpoint callback -- save every N steps (PPO weights + aux state)
     checkpoint_freq = config["callbacks"].get("checkpoint_freq", 100000)
     callbacks.append(
         CheckpointCallback(
             save_freq=checkpoint_freq,
             save_path=str(output_dir / "checkpoints"),
             name_prefix="harvy",
+        )
+    )
+    callbacks.append(
+        AuxStateCallback(
+            save_freq=checkpoint_freq,
+            save_path_prefix=str(output_dir / "checkpoints" / "harvy"),
         )
     )
 
@@ -251,19 +270,23 @@ def train(args: argparse.Namespace) -> None:
         )
     )
 
-    # Curriculum callback (only in guided mode)
+    # Curriculum callback (only in guided mode) -- drives the shared manager
     if not args.autonomous and config["curriculum"].get("enabled", True):
         callbacks.append(
             CurriculumCallback(
-                curriculum_stages=[s.name for s in curriculum.stages],
+                curriculum_manager=curriculum,
                 switch_threshold=config["curriculum"].get("switch_threshold", 0.7),
-                eval_freq=config["curriculum"].get("eval_freq", 10000),
             )
         )
 
-    # Skill evaluation callback
+    # Skill evaluation callback. NOTE: the eval env shares the bot's single
+    # TCP socket -- with multiple envs per bot this steals the connection
+    # from the training env. Keep eval_freq unset unless you run a second
+    # bot instance on a separate TCP port.
+    eval_env = None
+    benchmark_eval_env = None
     if config["callbacks"].get("eval_freq", None):
-        eval_env = create_env(config, goal="full_survival")
+        eval_env = create_env(config, goal="survive")
         callbacks.append(
             SkillEvaluationCallback(
                 eval_env=eval_env,
@@ -273,9 +296,9 @@ def train(args: argparse.Namespace) -> None:
             )
         )
 
-    # Benchmark evaluation callback
+    # Benchmark evaluation callback (same single-socket caveat as above)
     benchmark_cfg = config.get("benchmarks", {})
-    if benchmark_cfg.get("enabled", True) and BenchmarkSuite is not None:
+    if benchmark_cfg.get("enabled", False) and BenchmarkSuite is not None:
         logger.info("Benchmark suite enabled – will evaluate %d skill benchmarks", 7)
         benchmark_suite = BenchmarkSuite(output_dir=str(output_dir / "benchmarks"))
         # Create a dedicated eval env for benchmarks
@@ -289,7 +312,7 @@ def train(args: argparse.Namespace) -> None:
                 save_best=benchmark_cfg.get("save_best", True),
             )
         )
-    elif benchmark_cfg.get("enabled", True):
+    elif benchmark_cfg.get("enabled", False):
         logger.warning(
             "Benchmarks enabled in config but eval_benchmarks module not found"
         )
@@ -302,6 +325,7 @@ def train(args: argparse.Namespace) -> None:
     else:
         logger.info(f"Curriculum stage: {curriculum.current_stage.name}")
 
+    training_error: Optional[BaseException] = None
     try:
         model.learn(
             total_timesteps=total_timesteps,
@@ -311,20 +335,22 @@ def train(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         logger.info("Training interrupted by user")
     except Exception as e:
-        logger.error(f"Training error: {e}", exc_info=True)
+        training_error = e
+        logger.error(f"Training FAILED: {e}", exc_info=True)
     finally:
-        # Save final model
+        # Save final model + auxiliary state (normalizer stats, RND
+        # predictor) so a later --resume keeps identical distributions.
         final_path = output_dir / "final_model.zip"
         model.save(str(final_path))
         logger.info(f"Saved final model to {final_path}")
+        raw_env = getattr(env, "unwrapped", env)
+        if hasattr(raw_env, "save_aux_state"):
+            raw_env.save_aux_state(str(output_dir / "final_model"))
 
         # Save curriculum / autonomous goal state
         if args.autonomous:
-            import json
-
             progress_path = output_dir / "harvy_autonomous_state.json"
-            with open(progress_path, "w") as f:
-                json.dump(goal_generator.get_progress(), f, indent=2)
+            goal_generator.save_progress(str(progress_path))
             logger.info(f"Saved autonomous goal state to {progress_path}")
         else:
             curriculum_path = output_dir / "curriculum_state.yaml"
@@ -332,6 +358,15 @@ def train(args: argparse.Namespace) -> None:
             logger.info(f"Saved curriculum state to {curriculum_path}")
 
         env.close()
+        # Eval envs hold their own sockets -- close them too.
+        if eval_env is not None:
+            eval_env.close()
+        if benchmark_eval_env is not None:
+            benchmark_eval_env.close()
+
+    if training_error is not None:
+        # Don't mask a failed run behind a clean exit code.
+        sys.exit(1)
 
 
 def main():

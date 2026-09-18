@@ -7,13 +7,19 @@
  *
  * Architecture:
  *   - Connects to a Minecraft Java Edition server using Mineflayer
- *   - Runs a TCP server to send observations (20Hz) and receive action commands
+ *   - Runs a TCP server speaking a strict request/response protocol:
+ *     Python sends one action (or reset), the bot executes it and replies
+ *     with exactly one observation on the next physics tick. Reward event
+ *     counters accumulate between requests and are flushed on send, so no
+ *     reward signal is ever lost regardless of Python's step rate.
  *   - Tracks reward signals, danger levels, and voxel grids for the RL agent
  *
  * Environment variables:
  *   MC_HOST      - Minecraft server host (default: localhost)
  *   MC_PORT      - Minecraft server port (default: 25565)
  *   MC_USERNAME  - Bot username (default: RLBOT)
+ *   MC_VERSION   - Pin a Minecraft version (default: auto-detect)
+ *   MC_RESET_COMMANDS - Set to 0 to disable /clear+/kill episode resets
  *   TCP_PORT     - TCP server port for Python communication (default: 9876)
  *   DEBUG        - Set to 1 for verbose debug logging
  */
@@ -40,7 +46,8 @@ const CONFIG = {
   username: process.env.MC_USERNAME || 'harvy',
   tcpPort: parseInt(process.env.TCP_PORT, 10) || 9876,
   debug: process.env.DEBUG === '1',
-  version: '1.21.1', // Minecraft version; adjust as needed
+  // Auto-detect the server version by default; set MC_VERSION to pin one.
+  version: process.env.MC_VERSION || false,
 };
 
 // Voxel grid dimensions (must match SPEC)
@@ -88,20 +95,49 @@ let mcData = null;
 let tcpServer = null;
 let pythonSocket = null;
 
-// Reward tracking state
+// Reward tracking state. Counters ACCUMULATE between observation requests
+// and are only flushed when an observation is actually sent to Python --
+// never wiped per physics tick (that silently deleted reward signals).
 const rewardState = {
   lastHealth: 20,
   lastFood: 20,
-  mobKills: 0,
-  playerKills: 0,
+  mobKills: 0,          // mobs killed since last observation
+  playerKills: 0,       // players killed since last observation
   cumulativeDamage: 0,
   lastInventory: new Map(),
   itemsMined: 0,
   itemsLost: 0,
   foodEaten: 0,
   died: false,
-  killBuffer: [], // Buffer entity names killed since last tick
+  killBuffer: [], // Buffer entity names killed since last observation
+  blocksBrokenNames: [], // Names of blocks broken since last observation
+  itemsCrafted: 0,
+  blocksPlaced: 0,
+  shelterComplete: false,
+  distanceMoved: 0,
+  lastPos: null,
 };
+
+// Episode-level cumulative stats (reset only on episode reset), reported in
+// every observation so Python can populate info/benchmark metrics.
+const episodeStats = {
+  mobsKilled: 0,
+  playersKilled: 0,
+  blocksMined: 0,
+  blocksPlaced: 0,
+  itemsCrafted: 0,
+  resourcesCollected: 0,
+  pickaxeCrafted: false,
+  deaths: 0,
+};
+
+// Request/response protocol state: the bot sends exactly one observation
+// per action/reset command from Python -- never unsolicited at 20 Hz.
+let pendingObservation = false;
+let resetRespondAtTick = 0;      // Delay reset responses until the respawn settles
+let lastExecutedAction = null;   // Action that actually ran (after survival override)
+let lastActionOverride = false;  // True when the survival layer replaced the action
+let suppressNextDeath = false;   // Set when resetEpisode kills the bot on purpose
 
 // Observation buffer
 let latestObservation = null;
@@ -186,8 +222,26 @@ const SkillExecutor = {
    * Mark the current skill as completed.
    */
   completeSkill(result = 'done') {
-    this.lastSkillResult = { skill: this.activeSkill, result, tick: tickCount };
-    log(LOG_LEVELS.DEBUG, `Skill ${this.activeSkill} completed: ${result}`);
+    const skill = this.activeSkill;
+    this.lastSkillResult = { skill, result, tick: tickCount };
+    log(LOG_LEVELS.DEBUG, `Skill ${skill} completed: ${result}`);
+
+    // Track crafting / building outcomes for reward signals and episode stats.
+    if (skill && result === 'done') {
+      if (skill.startsWith('skill_craft_')) {
+        rewardState.itemsCrafted += 1;
+        episodeStats.itemsCrafted += 1;
+        const crafted = skill.replace('skill_craft_', '');
+        recordEvent('item_crafted', 1);
+        log(LOG_LEVELS.DEBUG, `Crafted via skill: ${crafted}`);
+        if (crafted.includes('pickaxe')) {
+          episodeStats.pickaxeCrafted = true;
+        }
+      } else if (skill === 'skill_build_shelter') {
+        rewardState.shelterComplete = true;
+      }
+    }
+
     this.cancelSkill();
   },
 
@@ -325,7 +379,7 @@ const SkillExecutor = {
         // Dig the block
         if (bot.canDigBlock(block)) {
           bot.dig(block, true)
-            .then(() => { this.skillState = 'collecting'; })
+            .then(() => { recordBrokenBlock(block); this.skillState = 'collecting'; })
             .catch(() => { this.skillState = 'finding_tree'; });
           this.skillState = 'digging_async';
         } else {
@@ -341,9 +395,10 @@ const SkillExecutor = {
         break;
 
       case 'collecting': {
-        // Give a moment for items to be collected by inventory
+        // Walk to the dropped item and give it time to be picked up
         this.skillData.collectWait = (this.skillData.collectWait || 0) + 1;
-        if (this.skillData.collectWait > 10) {
+        moveToNearestDrop(8);
+        if (this.skillData.collectWait > 20) {
           bot.pathfinder.setGoal(null);
           this.completeSkill('done');
         }
@@ -408,7 +463,7 @@ const SkillExecutor = {
         bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
         if (bot.canDigBlock(block)) {
           bot.dig(block, true)
-            .then(() => { this.skillState = 'collecting'; })
+            .then(() => { recordBrokenBlock(block); this.skillState = 'collecting'; })
             .catch(() => { this.skillState = 'finding_stone'; });
           this.skillState = 'digging_async';
         } else {
@@ -422,7 +477,8 @@ const SkillExecutor = {
 
       case 'collecting': {
         this.skillData.collectWait = (this.skillData.collectWait || 0) + 1;
-        if (this.skillData.collectWait > 10) {
+        moveToNearestDrop(8);
+        if (this.skillData.collectWait > 20) {
           bot.pathfinder.setGoal(null);
           this.completeSkill('done');
         }
@@ -487,7 +543,7 @@ const SkillExecutor = {
         bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
         if (bot.canDigBlock(block)) {
           bot.dig(block, true)
-            .then(() => { this.skillState = 'collecting'; })
+            .then(() => { recordBrokenBlock(block); this.skillState = 'collecting'; })
             .catch(() => { this.skillState = 'finding_coal_ore'; });
           this.skillState = 'digging_async';
         } else {
@@ -501,7 +557,8 @@ const SkillExecutor = {
 
       case 'collecting': {
         this.skillData.collectWait = (this.skillData.collectWait || 0) + 1;
-        if (this.skillData.collectWait > 10) {
+        moveToNearestDrop(8);
+        if (this.skillData.collectWait > 20) {
           bot.pathfinder.setGoal(null);
           this.completeSkill('done');
         }
@@ -1220,6 +1277,55 @@ function findNearestHostile(radius) {
 }
 
 /**
+ * Walk toward the nearest dropped item so dug blocks actually get picked up.
+ */
+function moveToNearestDrop(radius) {
+  if (!bot || !bot.entities) return false;
+  let nearest = null;
+  let nearestDist = Infinity;
+  for (const entity of Object.values(bot.entities)) {
+    if (!entity.position) continue;
+    const name = (entity.name || '').toLowerCase();
+    if (name !== 'item' && entity.displayName !== 'Item') continue;
+    const dist = distance(bot.entity.position, entity.position);
+    if (dist < nearestDist && dist <= radius) {
+      nearest = entity;
+      nearestDist = dist;
+    }
+  }
+  if (nearest) {
+    const goal = new pathfinder.goals.GoalNear(
+      nearest.position.x, nearest.position.y, nearest.position.z, 1
+    );
+    bot.pathfinder.setGoal(goal);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Record the name of a block the bot intentionally broke (the
+ * diggingCompleted event only carries the replacement air block).
+ */
+function recordBrokenBlock(block) {
+  if (block && block.name) {
+    rewardState.blocksBrokenNames.push(block.name);
+  }
+}
+
+/**
+ * diggingCompleted handler. NOTE: mineflayer emits the NEW block (air), not
+ * the broken one -- the broken block's name is recorded by the skill FSMs,
+ * which know their dig target. Here we only count the dig.
+ */
+function onDiggingCompleted(_newBlock) {
+  recordEvent('block_broken', 1);
+  rewardState.itemsMined += 1;
+  episodeStats.blocksMined += 1;
+  log(LOG_LEVELS.DEBUG, 'Block dig completed');
+}
+
+/**
  * Helper: attempt to place a block at a specific position.
  */
 async function placeBlockAt(botInstance, referenceBlock, faceVector) {
@@ -1344,8 +1450,26 @@ function writeUUID(uuid) {
 
 function getBlockTypeId(block) {
   if (!block) return 0;
-  return block.type || 0;
+  // Compact, stable block IDs shared with Python's BLOCK_TYPE_TO_ID.
+  // Raw minecraft-data IDs are 4-digit in modern versions and would wrap
+  // around in the Uint8Array voxel grid.
+  return BLOCK_NAME_TO_ID[block.name] ?? UNKNOWN_BLOCK_ID;
 }
+
+// Must match BLOCK_TYPE_TO_ID in src/env/observation.py exactly.
+const BLOCK_NAME_TO_ID = {
+  air: 0, stone: 1, granite: 2, diorite: 3, andesite: 4, grass_block: 5,
+  dirt: 6, coarse_dirt: 7, podzol: 8, cobblestone: 9, oak_planks: 10,
+  oak_log: 11, oak_leaves: 12, glass: 13, lapis_ore: 14, sandstone: 15,
+  sand: 16, gravel: 17, coal_ore: 18, iron_ore: 19, gold_ore: 20,
+  diamond_ore: 21, redstone_ore: 22, emerald_ore: 23, oak_sapling: 24,
+  bedrock: 25, water: 26, lava: 27, flowing_water: 28, flowing_lava: 29,
+  torch: 30, crafting_table: 31, furnace: 32, chest: 33, ladder: 34,
+  oak_door: 35, wheat: 36, farmland: 37, furnace_lit: 38, oak_sign: 39,
+  oak_stairs: 40, cobblestone_stairs: 41,
+};
+// Any block not in the table gets this shared "other" ID.
+const UNKNOWN_BLOCK_ID = 255;
 
 function round2(val) {
   return Math.round(val * 100) / 100;
@@ -1403,7 +1527,25 @@ function createBot() {
 
   bot.on('death', () => {
     log(LOG_LEVELS.WARN, 'Bot died');
-    rewardState.died = true;
+    episodeStats.deaths += 1;
+    if (suppressNextDeath) {
+      // Death caused by the episode-reset /kill command -- not a real
+      // gameplay death, so don't emit a death reward signal.
+      suppressNextDeath = false;
+    } else {
+      rewardState.died = true;
+      // Everything in the inventory is lost on death (no keepInventory).
+      const carried = Object.values(getInventoryCounts()).reduce((a, b) => a + b, 0);
+      rewardState.itemsLost += carried;
+    }
+    // Always auto-respawn so the bot is ready for the next episode/step.
+    if (bot._client) {
+      try {
+        bot._client.write('client_command', { action: 0 });
+      } catch (err) {
+        log(LOG_LEVELS.DEBUG, 'Auto-respawn failed:', err.message);
+      }
+    }
   });
 
   bot.on('entityDead', (entity) => {
@@ -1420,6 +1562,12 @@ function createBot() {
   });
 
   bot.on('health', () => {
+    if (suppressNextDeath) {
+      // During the episode-reset /kill window, don't record the scripted
+      // death's damage as a gameplay penalty.
+      rewardState.lastHealth = bot.health;
+      return;
+    }
     if (bot.health < rewardState.lastHealth) {
       const damage = rewardState.lastHealth - bot.health;
       rewardState.cumulativeDamage += damage;
@@ -1435,17 +1583,25 @@ function createBot() {
     log(LOG_LEVELS.DEBUG, 'Bot ate food');
   });
 
-  bot.on('diggingCompleted', (block) => {
-    if (block) {
-      recordEvent('block_broken', 1);
-      rewardState.itemsMined += 1;
-      log(LOG_LEVELS.DEBUG, `Block broken: ${block.name}`);
-    }
+  bot.on('diggingCompleted', onDiggingCompleted);
+  bot.on('spawn', () => {
+    // mineflayer's digging plugin removes ALL diggingCompleted listeners on
+    // death -- re-register ours after every (re)spawn.
+    bot.removeListener('diggingCompleted', onDiggingCompleted);
+    bot.on('diggingCompleted', onDiggingCompleted);
+  });
+
+  bot.on('blockPlaced', (_oldBlock, newBlock) => {
+    rewardState.blocksPlaced += 1;
+    episodeStats.blocksPlaced += 1;
+    recordEvent('block_placed', 1);
+    log(LOG_LEVELS.DEBUG, `Block placed: ${newBlock ? newBlock.name : 'unknown'}`);
   });
 
   bot.on('playerCollect', (collector, collected) => {
     if (collector === bot.entity && collected) {
       recordEvent('item_collected', 1);
+      episodeStats.resourcesCollected += 1;
       log(LOG_LEVELS.DEBUG, `Item collected: ${collected.name || 'unknown'}`);
     }
   });
@@ -1466,6 +1622,11 @@ function createBot() {
 }
 
 function applyConfigurationWorkaround(bot) {
+  // Legacy workaround for servers whose configuration phase mineflayer
+  // didn't handle natively. Modern mineflayer handles select_known_packs
+  // and resource packs itself -- answering twice desyncs the registry
+  // codec. Only enable via MC_CONFIG_WORKAROUND=1 if a server needs it.
+  if (process.env.MC_CONFIG_WORKAROUND !== '1') return;
   const client = bot._client;
   if (!client) return;
 
@@ -1502,16 +1663,59 @@ function resetRewardState() {
   rewardState.foodEaten = 0;
   rewardState.died = false;
   rewardState.killBuffer = [];
+  rewardState.blocksBrokenNames = [];
+  rewardState.itemsCrafted = 0;
+  rewardState.blocksPlaced = 0;
+  rewardState.shelterComplete = false;
+  rewardState.distanceMoved = 0;
+  rewardState.lastPos = bot && bot.entity ? bot.entity.position.clone() : null;
   tickCount = 0;
   log(LOG_LEVELS.DEBUG, 'Reward state reset');
+}
+
+function resetEpisodeStats() {
+  episodeStats.mobsKilled = 0;
+  episodeStats.playersKilled = 0;
+  episodeStats.blocksMined = 0;
+  episodeStats.blocksPlaced = 0;
+  episodeStats.itemsCrafted = 0;
+  episodeStats.resourcesCollected = 0;
+  episodeStats.pickaxeCrafted = false;
+  episodeStats.deaths = 0;
 }
 
 function resetEpisode(goal) {
   if (!bot) return;
   currentGoal = goal || 'survive_first_night';
+  SkillExecutor.cancelSkill();
   releaseAllControls();
   resetRewardState();
+  resetEpisodeStats();
   recentEvents.length = 0;
+  visitedChunks.length = 0;
+  lastExecutedAction = null;
+  lastActionOverride = false;
+
+  // Best-effort world reset via server commands (requires the bot to be
+  // opped on the server; failures are harmless and logged at debug level).
+  if (process.env.MC_RESET_COMMANDS !== '0') {
+    try {
+      suppressNextDeath = true;
+      // If the bot isn't opped the /kill never lands; expire the flag so a
+      // later real death is not swallowed.
+      setTimeout(() => { suppressNextDeath = false; }, 5000);
+      // Hold the reset response until the kill/respawn has settled, so the
+      // observation reflects the fresh spawn state, not the corpse.
+      resetRespondAtTick = tickCount + 20;
+      bot.chat(`/clear ${CONFIG.username}`);
+      bot.chat(`/kill ${CONFIG.username}`);
+      bot.chat('/time set day');
+      log(LOG_LEVELS.DEBUG, 'Sent world-reset server commands (/clear, /kill, /time set day)');
+    } catch (err) {
+      log(LOG_LEVELS.DEBUG, 'World-reset commands failed (bot not opped?):', err.message);
+    }
+  }
+
   const isDead = bot.health === 0 || (bot.isAlive === false);
   if (isDead && bot._client) {
     try {
@@ -1531,6 +1735,15 @@ function startTcpServer() {
   if (tcpServer) return;
 
   tcpServer = net.createServer((socket) => {
+    // Exactly ONE Python client may drive the bot. A second connection
+    // (e.g. an eval env) would otherwise silently steal pythonSocket and
+    // starve the training env of observations.
+    if (pythonSocket && !pythonSocket.destroyed) {
+      log(LOG_LEVELS.WARN,
+        `Rejecting extra Python client ${socket.remoteAddress}:${socket.remotePort} -- one client per bot`);
+      socket.destroy();
+      return;
+    }
     log(LOG_LEVELS.INFO, `Python agent connected from ${socket.remoteAddress}:${socket.remotePort}`);
     pythonSocket = socket;
     socket.setEncoding('utf8');
@@ -1548,12 +1761,12 @@ function startTcpServer() {
 
     socket.on('end', () => {
       log(LOG_LEVELS.INFO, 'Python agent disconnected');
-      pythonSocket = null;
+      if (pythonSocket === socket) pythonSocket = null;
     });
 
     socket.on('error', (err) => {
       log(LOG_LEVELS.ERROR, 'TCP socket error:', err.message);
-      pythonSocket = null;
+      if (pythonSocket === socket) pythonSocket = null;
     });
   });
 
@@ -1805,6 +2018,34 @@ function handleActionMessage(jsonStr) {
 
   if (actionName === 'reset') {
     resetEpisode(action.goal);
+    // Respond with a fresh observation on the next physics tick.
+    pendingObservation = true;
+    return;
+  }
+
+  // Goal change WITHOUT a world reset (used by autonomous goal re-selection
+  // right after reset -- avoids killing the bot twice per episode).
+  if (actionName === 'set_goal') {
+    if (typeof action.goal === 'string' && action.goal) {
+      currentGoal = action.goal;
+      log(LOG_LEVELS.DEBUG, `Goal updated: ${currentGoal}`);
+    }
+    pendingObservation = true;
+    return;
+  }
+
+  // Out-of-band server command (Mission Control "execute_command"): run a
+  // slash command as chat. Does NOT produce an observation response.
+  if (actionName === 'server_command') {
+    const cmd = typeof action.command === 'string' ? action.command : '';
+    if (cmd) {
+      try {
+        bot.chat(cmd.startsWith('/') ? cmd : `/${cmd}`);
+        log(LOG_LEVELS.INFO, `Executed server command: /${cmd.replace(/^\//, '')}`);
+      } catch (err) {
+        log(LOG_LEVELS.WARN, `Server command failed: ${err.message}`);
+      }
+    }
     return;
   }
 
@@ -1815,6 +2056,9 @@ function handleActionMessage(jsonStr) {
 
   log(LOG_LEVELS.DEBUG, `Executing action: ${actionName} (value=${value})`);
   executeAction(actionName, value);
+  // Strict request/response: exactly one observation per action, sent on
+  // the next physics tick so the action has had time to take effect.
+  pendingObservation = true;
 }
 
 function executeAction(action, value) {
@@ -1822,26 +2066,34 @@ function executeAction(action, value) {
 
   // --- SURVIVAL PRIORITY LAYER ---
   // Check survival priorities BEFORE executing any RL action.
-  // If a survival condition is critical, override the RL action.
+  // If a survival condition is critical, override the RL action. The
+  // actually-executed action is reported back in the next observation so
+  // Python can log the transition honestly.
   const survival = checkSurvivalPriorities();
   if (survival.override) {
     log(LOG_LEVELS.DEBUG, `Survival override: ${survival.reason}`);
-    // Cancel any active skill if survival takes over
+    lastExecutedAction = survival.action;
+    lastActionOverride = survival.action !== action;
+
+    // Don't cancel/restart the very skill the override wants -- restarting
+    // every step would pin the FSM in its first state forever.
     if (SkillExecutor.activeSkill && survival.action !== SkillExecutor.activeSkill) {
       SkillExecutor.cancelSkill();
     }
-    // Execute the survival action instead
+    const startOnce = (skill) => {
+      if (SkillExecutor.activeSkill !== skill) SkillExecutor.startSkill(skill);
+    };
     if (survival.action === 'noop') {
       releaseAllControls();
       return;
     } else if (survival.action === 'skill_flee') {
-      SkillExecutor.startSkill('skill_flee');
+      startOnce('skill_flee');
       return;
     } else if (survival.action === 'skill_eat_food') {
-      SkillExecutor.startSkill('skill_eat_food');
+      startOnce('skill_eat_food');
       return;
     } else if (survival.action === 'skill_build_shelter') {
-      SkillExecutor.startSkill('skill_build_shelter');
+      startOnce('skill_build_shelter');
       return;
     } else if (survival.action === 'jump') {
       bot.setControlState('jump', true);
@@ -1855,6 +2107,9 @@ function executeAction(action, value) {
   }
   // --- END SURVIVAL PRIORITY LAYER ---
 
+  lastExecutedAction = action;
+  lastActionOverride = false;
+
   const boolValue = value > 0.5;
 
   // --- SKILL ACTIONS ---
@@ -1865,7 +2120,10 @@ function executeAction(action, value) {
       log(LOG_LEVELS.WARN, `Unknown skill action: ${action}`);
       return;
     }
-    SkillExecutor.startSkill(action);
+    // Re-selecting the already-running skill must not restart its FSM.
+    if (SkillExecutor.activeSkill !== action) {
+      SkillExecutor.startSkill(action);
+    }
     return;
   }
 
@@ -2046,20 +2304,50 @@ function onPhysicsTick() {
     timedControls.forwardReleaseTick = -1;
   }
 
+  // Accumulate horizontal distance travelled (for exploration rewards).
+  if (rewardState.lastPos) {
+    const dx = bot.entity.position.x - rewardState.lastPos.x;
+    const dz = bot.entity.position.z - rewardState.lastPos.z;
+    const step = Math.sqrt(dx * dx + dz * dz);
+    // Ignore teleports/spawn snaps (> 20 blocks in one tick).
+    if (step <= 20) rewardState.distanceMoved += step;
+  }
+  rewardState.lastPos = bot.entity.position.clone();
+
   // Update active skill FSM if a skill is running
   if (SkillExecutor.activeSkill) {
     SkillExecutor.updateActiveSkill();
   }
 
-  const observation = buildObservation();
-  latestObservation = observation;
-  sendObservation(observation);
+  // Strict request/response protocol: only send an observation when Python
+  // asked for one (via an action or reset). Reward counters accumulate
+  // between requests and are flushed here -- nothing is wiped per tick.
+  if (pendingObservation && tickCount >= resetRespondAtTick && pythonSocket && !pythonSocket.destroyed) {
+    pendingObservation = false;
+    const observation = buildObservation();
+    latestObservation = observation;
+    sendObservation(observation);
+    flushRewardSignals();
+  }
+}
 
+/**
+ * Clear the per-step reward accumulators. Called ONLY right after an
+ * observation has actually been sent to Python, so no signal is ever lost.
+ */
+function flushRewardSignals() {
   rewardState.cumulativeDamage = 0;
   rewardState.itemsMined = 0;
   rewardState.itemsLost = 0;
   rewardState.foodEaten = 0;
   rewardState.killBuffer = [];
+  rewardState.blocksBrokenNames = [];
+  rewardState.itemsCrafted = 0;
+  rewardState.blocksPlaced = 0;
+  rewardState.shelterComplete = false;
+  rewardState.distanceMoved = 0;
+  rewardState.mobKills = 0;
+  rewardState.playerKills = 0;
   if (rewardState.died) rewardState.died = false;
 }
 
@@ -2087,6 +2375,9 @@ function buildObservation() {
     environment: buildEnvironment(pos),
     goal: currentGoal,
     reward_signal: buildRewardSignal(),
+    episode_stats: { ...episodeStats },
+    executed_action: lastExecutedAction,
+    action_overridden: lastActionOverride,
     skill_status: {
       active_skill: SkillExecutor.activeSkill,
       skill_state: SkillExecutor.skillState,
@@ -2252,13 +2543,24 @@ function buildSelfObservation(pos, yawDeg, pitchDeg) {
   };
 }
 
+// Armor points per piece (Java edition values).
+const ARMOR_POINTS = {
+  leather_helmet: 1, leather_chestplate: 3, leather_leggings: 2, leather_boots: 1,
+  golden_helmet: 2, golden_chestplate: 5, golden_leggings: 3, golden_boots: 1,
+  chainmail_helmet: 2, chainmail_chestplate: 5, chainmail_leggings: 4, chainmail_boots: 1,
+  iron_helmet: 2, iron_chestplate: 6, iron_leggings: 5, iron_boots: 2,
+  diamond_helmet: 3, diamond_chestplate: 8, diamond_leggings: 6, diamond_boots: 3,
+  netherite_helmet: 3, netherite_chestplate: 8, netherite_leggings: 6, netherite_boots: 3,
+  turtle_helmet: 2, elytra: 0,
+};
+
 function getArmorValue() {
   if (!bot.inventory) return 0;
   const armorSlots = [5, 6, 7, 8];
   let total = 0;
   for (const slotIdx of armorSlots) {
     const item = bot.inventory.slots[slotIdx];
-    if (item) total += 1;
+    if (item) total += ARMOR_POINTS[item.name] || 0;
   }
   return total;
 }
@@ -2275,6 +2577,15 @@ function getInventoryCounts() {
   return counts;
 }
 
+// Typical max health per mob, used only when the server hasn't sent an
+// entity's actual health yet (entity.health is undefined until damaged).
+const DEFAULT_ENTITY_HEALTH = {
+  zombie: 20, skeleton: 20, creeper: 20, spider: 16, enderman: 40,
+  witch: 26, drowned: 20, husk: 20, stray: 20, phantom: 20, slime: 16,
+  cave_spider: 12, blaze: 20, cow: 10, pig: 10, sheep: 8, chicken: 4,
+  rabbit: 3, horse: 30, villager: 20, wolf: 8, goat: 10, player: 20,
+};
+
 function buildNearbyEntities() {
   const entities = [];
   if (!bot || !bot.entities) return entities;
@@ -2284,10 +2595,15 @@ function buildNearbyEntities() {
     const dist = distance(bot.entity.position, entity.position);
     if (dist > 32) continue;
     const isHostile = isHostileMob(entity);
+    const name = (entity.name || entity.type || 'unknown').toLowerCase();
+    let health = entity.health;
+    if (health === undefined || health === null) {
+      health = DEFAULT_ENTITY_HEALTH[name] ?? (isHostile ? 20 : 10);
+    }
     entities.push({
       type: entity.name || entity.type || 'unknown',
       distance: round2(dist),
-      health: entity.health || (isHostile ? 20 : 0),
+      health,
       hostile: isHostile,
     });
   }
@@ -2439,27 +2755,37 @@ function checkLavaNearby(pos, radius) {
   return false;
 }
 
+/**
+ * Build the raw reward signal: event COUNTS since the last observation was
+ * sent. All scaling into reward magnitudes happens on the Python side.
+ */
 function buildRewardSignal() {
-  let mobKilledReward = 0;
   for (const kill of rewardState.killBuffer) {
     if (kill.type === 'mob') {
-      mobKilledReward += 50;
       rewardState.mobKills++;
+      episodeStats.mobsKilled++;
     } else if (kill.type === 'player') {
-      mobKilledReward += 100;
       rewardState.playerKills++;
+      episodeStats.playersKilled++;
     }
   }
-  const deathReward = rewardState.died ? -100 : 0;
 
   return {
     alive_tick: 1,
     damage_taken: round2(rewardState.cumulativeDamage),
-    mob_killed: mobKilledReward,
+    mob_killed: rewardState.mobKills,
+    player_killed: rewardState.playerKills,
     item_mined: rewardState.itemsMined,
     item_lost: rewardState.itemsLost,
+    item_crafted: rewardState.itemsCrafted,
+    block_placed: rewardState.blocksPlaced,
+    shelter_complete: rewardState.shelterComplete ? 1 : 0,
+    distance_moved: round2(rewardState.distanceMoved),
+    block_broken_name: rewardState.blocksBrokenNames.length > 0
+      ? rewardState.blocksBrokenNames[rewardState.blocksBrokenNames.length - 1]
+      : null,
     food_eaten: rewardState.foodEaten,
-    death: deathReward,
+    death: rewardState.died ? 1 : 0,
   };
 }
 

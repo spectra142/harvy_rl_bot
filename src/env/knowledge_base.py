@@ -7,28 +7,26 @@ mob behaviors, and other game knowledge.
 import json
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 
 class MinecraftKnowledgeBase:
     """Static and cached Minecraft game knowledge.
 
     Provides crafting recipes, tool tiers, mob behavior data, block hardness,
     mining efficiency calculations, and optimal Y-levels for resources.  The
-    data is stored as plain Python dicts so the module works even when the
-    ``minecraft-data`` package is not installed.
+    data is stored as plain Python dicts so the module works without any
+    external minecraft-data dependency.
     """
 
-    def __init__(self, mc_version: str = "1.19.2"):
+    def __init__(self, mc_version: str = "1.21.1"):
         """Initialize knowledge base for a specific Minecraft version.
 
         Args:
-            mc_version: Minecraft version string (e.g. ``"1.19.2"``).
+            mc_version: Minecraft version string. Currently informational
+                only; the built-in tables apply to modern (1.21+) versions.
         """
-        try:
-            import minecraft_data  # type: ignore[import-untyped]
-
-            self.mc_data = minecraft_data(mc_version)
-        except (ImportError, KeyError):
-            self.mc_data = None
+        self.mc_version = mc_version
 
         self._load_recipes()
         self._load_tool_tiers()

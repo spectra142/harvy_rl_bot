@@ -126,7 +126,7 @@ class AutonomousCurriculum:
     ZPD_MIN = 0.30
     ZPD_MAX = 0.70
 
-    def __init__(self, temperature: float = 2.0, mc_version: str = "1.19.2"):
+    def __init__(self, temperature: float = 2.0, mc_version: str = "1.21.1"):
         """
         Args:
             temperature: Higher = more random exploration. Lower = stick to best goals.
@@ -271,6 +271,29 @@ class AutonomousCurriculum:
             },
         }
 
+    def set_progress(self, progress: Dict) -> None:
+        """Restore goal history saved by :meth:`get_progress` (checkpoint resume)."""
+        self.last_goal = progress.get("current_goal", self.last_goal)
+        for goal, stats in progress.get("goals", {}).items():
+            if goal not in self.GOAL_CATALOG:
+                continue
+            self.episode_counts[goal] = int(stats.get("episodes", 0))
+            self.success_counts[goal] = int(stats.get("successes", 0))
+
+    def save_progress(self, path: str) -> None:
+        """Persist goal history to a JSON file."""
+        import json
+
+        with open(path, "w") as f:
+            json.dump(self.get_progress(), f, indent=2)
+
+    def load_progress(self, path: str) -> None:
+        """Restore goal history from a JSON file written by :meth:`save_progress`."""
+        import json
+
+        with open(path) as f:
+            self.set_progress(json.load(f))
+
     # ================================================================ #
     #  Internal: Goal proposal
     # ================================================================ #
@@ -284,7 +307,7 @@ class AutonomousCurriculum:
         time_of_day: float = state.get("time_of_day", 6000.0)
         danger_level: float = state.get("danger_level", 0.0)
         nearby_hostiles: int = state.get("nearby_hostiles", 0)
-        held_item: str = state.get("held_item", "")
+        held_item: str = state.get("held_item") or ""
 
         # ---- Always propose survival as a fallback ----
         proposals.append(GoalProposal("survive", "Survive", 0.3, [], 0.5))

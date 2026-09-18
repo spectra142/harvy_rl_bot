@@ -45,11 +45,15 @@ curriculum:
 callbacks:
   checkpoint_freq: 100000
   log_freq: 1000
-  eval_freq: 50000
+  # eval_freq / benchmarks need a SECOND bot instance on a separate TCP port:
+  # the bot accepts exactly one Python client, so an eval env on the same
+  # port would steal the training connection. Leave null/false unless you
+  # run a dedicated eval bot.
+  eval_freq: null
   n_eval_episodes: 10
 
 benchmarks:
-  enabled: true
+  enabled: false
   eval_freq: 50000
   n_eval_episodes: 3
   save_best: true

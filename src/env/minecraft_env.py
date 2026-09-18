@@ -6,11 +6,17 @@ import numpy as np
 import socket
 import json
 import base64
+import threading
 import time
 import logging
 from typing import Optional, Tuple, Dict, Any
 
-from .observation import build_observation, get_observation_space
+from .observation import (
+    build_observation,
+    get_observation_space,
+    goal_to_id,
+    INVENTORY_SIZE,
+)
 from .rewards import RewardCalculator
 from .intrinsic_motivation import IntrinsicMotivation
 from .rnd_curiosity import RNDCuriosity
@@ -81,6 +87,8 @@ class MinecraftEnv(gym.Env):
             goal=goal,
         )
         self.sock: Optional[socket.socket] = None
+        self._recv_buffer = b""
+        self._send_lock = threading.Lock()
         self.current_step = 0
         self.episode_reward = 0.0
         self._last_raw_obs: Optional[dict] = None
@@ -104,6 +112,7 @@ class MinecraftEnv(gym.Env):
             self.sock.settimeout(30.0)
             try:
                 self.sock.connect((self.host, self.port))
+                self._recv_buffer = b""
                 logger.info(
                     f"Connected to bot at {self.host}:{self.port} (attempt {attempt + 1})"
                 )
@@ -128,28 +137,41 @@ class MinecraftEnv(gym.Env):
         try:
             cmd = action_name_to_json(action_idx)
             msg = json.dumps(cmd) + "\n"
-            self.sock.sendall(msg.encode("utf-8"))
+            with self._send_lock:
+                self.sock.sendall(msg.encode("utf-8"))
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
             logger.error(f"Failed to send action: {e}")
 
     def _receive_observation(self) -> Optional[dict]:
-        """Receive observation from bot."""
+        """Receive one observation from the bot.
+
+        The bot speaks a strict request/response protocol: exactly one
+        observation per action/reset we send. Any extra lines in the buffer
+        (e.g. left over from a reconnect) are drained and the freshest one
+        wins, so the agent never acts on stale state.
+        """
         if not self.sock:
             return None
         try:
-            # Read lines until we get a complete JSON object
-            buffer = b""
             while True:
-                data = self.sock.recv(8192)
+                data = self.sock.recv(65536)
                 if not data:
                     return None
-                buffer += data
-                while b"\n" in buffer:
-                    line, buffer = buffer.split(b"\n", 1)
-                    try:
-                        return json.loads(line.decode("utf-8", errors="replace"))
-                    except json.JSONDecodeError:
-                        continue
+                self._recv_buffer += data
+                if b"\n" in self._recv_buffer:
+                    lines = self._recv_buffer.split(b"\n")
+                    self._recv_buffer = lines.pop()
+                    latest = None
+                    for line in lines:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            latest = json.loads(line.decode("utf-8", errors="replace"))
+                        except json.JSONDecodeError:
+                            continue
+                    if latest is not None:
+                        return latest
         except (socket.timeout, ConnectionResetError, OSError) as e:
             logger.error(f"Failed to receive observation: {e}")
             return None
@@ -162,7 +184,6 @@ class MinecraftEnv(gym.Env):
         """Reset environment -- starts new episode."""
         super().reset(seed=seed)
 
-        self.reward_calculator.reset()
         self.current_step = 0
         self.episode_reward = 0.0
 
@@ -200,7 +221,8 @@ class MinecraftEnv(gym.Env):
 
         reset_cmd = {"action": "reset", "goal": goal}
         try:
-            self.sock.sendall((json.dumps(reset_cmd) + "\n").encode("utf-8"))
+            with self._send_lock:
+                self.sock.sendall((json.dumps(reset_cmd) + "\n").encode("utf-8"))
         except OSError:
             pass
 
@@ -225,10 +247,12 @@ class MinecraftEnv(gym.Env):
             if new_goal != self.goal:
                 self.goal = new_goal
                 self.reward_calculator.goal = new_goal
-                # Re-send reset with the updated goal
-                reset_cmd = {"action": "reset", "goal": new_goal}
+                # Update the goal WITHOUT a second world reset (avoids
+                # killing/respawning the bot twice per episode).
+                goal_cmd = {"action": "set_goal", "goal": new_goal}
                 try:
-                    self.sock.sendall((json.dumps(reset_cmd) + "\n").encode("utf-8"))
+                    with self._send_lock:
+                        self.sock.sendall((json.dumps(goal_cmd) + "\n").encode("utf-8"))
                 except OSError:
                     pass
                 # Receive fresh observation for the new goal
@@ -239,6 +263,10 @@ class MinecraftEnv(gym.Env):
             self._last_raw_obs = raw_obs
         else:
             obs = self._dummy_observation()
+
+        # Prime reward baselines from the actual starting state so items the
+        # bot carries across episodes don't grant a spurious inventory jackpot.
+        self.reward_calculator.reset(obs)
 
         # Apply frame stacking first, then normalization (normalizer stats match stacked shapes).
         if self.frame_stacker is not None:
@@ -304,13 +332,13 @@ class MinecraftEnv(gym.Env):
         reward = extrinsic_reward + intrinsic_reward + rnd_reward
         self.episode_reward += reward
 
-        # Check termination using raw health from the bot.
+        # Check termination using raw health from the bot. The death penalty
+        # itself is applied once inside RewardCalculator via the death signal.
         terminated = False
         termination_reason = None
         health = raw_obs.get("self", {}).get("health", 20.0)
         if health <= 0:
             terminated = True
-            reward += -100.0  # Death penalty
             termination_reason = "death"
 
         truncated = self.current_step >= self.max_episode_steps
@@ -329,6 +357,7 @@ class MinecraftEnv(gym.Env):
             )
 
         self_data = raw_obs.get("self", {})
+        episode_stats = raw_obs.get("episode_stats", {})
         info = {
             "step": self.current_step,
             "episode_reward": self.episode_reward,
@@ -342,6 +371,18 @@ class MinecraftEnv(gym.Env):
             "position": list(self_data.get("position", [0.0, 64.0, 0.0])),
             "held_item": self_data.get("held_item", ""),
             "inventory_counts": dict(self_data.get("inventory_counts", {})),
+            # Episode-level stats reported by the bot (benchmarks/eval use these)
+            "mobs_killed": episode_stats.get("mobsKilled", 0),
+            "players_killed": episode_stats.get("playersKilled", 0),
+            "blocks_mined": episode_stats.get("blocksMined", 0),
+            "blocks_placed": episode_stats.get("blocksPlaced", 0),
+            "items_crafted": episode_stats.get("itemsCrafted", 0),
+            "resources_collected": episode_stats.get("resourcesCollected", 0),
+            "pickaxe_crafted": bool(episode_stats.get("pickaxeCrafted", False)),
+            "deaths": episode_stats.get("deaths", 0),
+            # Honest action accounting (survival layer may have overridden)
+            "executed_action": raw_obs.get("executed_action"),
+            "action_overridden": bool(raw_obs.get("action_overridden", False)),
         }
 
         # Apply frame stacking and normalization AFTER reward computation.
@@ -369,6 +410,42 @@ class MinecraftEnv(gym.Env):
         self.goal = goal
         self.reward_calculator.goal = goal
 
+    def send_text_command(self, command: str) -> bool:
+        """Send an out-of-band server command to the bot (no obs response).
+
+        Used by Mission Control's execute_command. Returns True if the
+        command was written to the socket.
+        """
+        if not self.sock:
+            return False
+        try:
+            msg = json.dumps({"action": "server_command", "command": command}) + "\n"
+            with self._send_lock:
+                self.sock.sendall(msg.encode("utf-8"))
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            logger.error(f"Failed to send server command: {e}")
+            return False
+
+    def save_aux_state(self, prefix: str) -> None:
+        """Persist auxiliary training state (normalizer stats, RND) to disk."""
+        if self.normalizer is not None:
+            self.normalizer.save(f"{prefix}.normalizer.pkl")
+        if self.rnd_curiosity is not None:
+            self.rnd_curiosity.save(f"{prefix}.rnd.pt")
+
+    def load_aux_state(self, prefix: str) -> None:
+        """Restore auxiliary training state saved by :meth:`save_aux_state`."""
+        import os
+
+        norm_path = f"{prefix}.normalizer.pkl"
+        if self.normalizer is not None and os.path.exists(norm_path):
+            self.normalizer.load(norm_path)
+            logger.info(f"Loaded observation normalizer stats from {norm_path}")
+        rnd_path = f"{prefix}.rnd.pt"
+        if self.rnd_curiosity is not None and os.path.exists(rnd_path):
+            self.rnd_curiosity.load(rnd_path)
+
     def close(self) -> None:
         """Close environment and socket connection."""
         if self.sock:
@@ -388,7 +465,7 @@ class MinecraftEnv(gym.Env):
             "self_yaw": np.array([0.0], dtype=np.float32),
             "self_pitch": np.array([0.0], dtype=np.float32),
             "self_held_item_id": np.array([0.0], dtype=np.float32),
-            "inventory": np.zeros((32,), dtype=np.float32),
+            "inventory": np.zeros((INVENTORY_SIZE,), dtype=np.float32),
             "entity_type_ids": np.zeros((16,), dtype=np.float32),
             "entity_distances": np.zeros((16, 1), dtype=np.float32),
             "entity_healths": np.zeros((16, 1), dtype=np.float32),
@@ -410,5 +487,5 @@ class MinecraftEnv(gym.Env):
             "env_in_water": np.array([0.0], dtype=np.float32),
             "env_on_ground": np.array([1.0], dtype=np.float32),
             "env_danger_level": np.array([0.0], dtype=np.float32),
-            "goal_id": np.array([7.0], dtype=np.float32),
+            "goal_id": np.array([goal_to_id("survive_first_night")], dtype=np.float32),
         }

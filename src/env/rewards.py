@@ -1,10 +1,16 @@
-"""Reward calculation per skill module."""
+"""Reward calculation per skill module.
+
+The bot sends raw event *counts* (mobs killed, blocks placed, damage points,
+...); all scaling/clipping lives here so there is exactly one place that
+turns events into reward magnitudes.
+"""
 
 import logging
 import numpy as np
 from typing import Dict, Any, Optional
 
 from .knowledge_base import MinecraftKnowledgeBase
+from .observation import ITEM_NAME_TO_ID, ITEM_ID_TO_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -12,12 +18,13 @@ logger = logging.getLogger(__name__)
 class RewardCalculator:
     """Computes shaped rewards based on bot state transitions."""
 
-    # Goal-specific reward configuration
+    # Goal-specific reward configuration. Keys are the canonical goal names
+    # from env.observation.GOAL_TO_ID.
     GOAL_REWARDS: Dict[str, Dict[str, Any]] = {
         "gather_logs": {"item": "oak_log", "bonus": 5.0, "per_item": 1.0},
         "gather_stone": {"item": "cobblestone", "bonus": 3.0, "per_item": 0.5},
         "gather_coal": {"item": "coal", "bonus": 4.0, "per_item": 1.0},
-        "gather_iron": {"item": "iron_ore", "bonus": 6.0, "per_item": 1.5},
+        "gather_iron": {"item": "raw_iron", "bonus": 6.0, "per_item": 1.5},
         "craft_pickaxe": {"item_contains": "pickaxe", "bonus": 10.0},
         "craft_sword": {"item_contains": "sword", "bonus": 8.0},
         "craft_planks": {"item": "oak_planks", "bonus": 2.0, "per_item": 0.2},
@@ -33,6 +40,7 @@ class RewardCalculator:
         "eat_food": {"food_eaten": True, "bonus": 3.0},
         "explore": {"distance_moved": True, "per_block": 0.1},
         "survive": {"per_tick": 0.1},
+        "survive_first_night": {"per_tick": 0.1},
     }
 
     def __init__(
@@ -52,15 +60,43 @@ class RewardCalculator:
         self.prev_alive = True
         self._prev_held_item: Optional[str] = None
         # Track per-item counts for goal-specific reward shaping
-        self._prev_inventory_counts: Dict[str, int] = {}
+        self._prev_inventory_counts: Dict[str, float] = {}
 
-    def reset(self):
+    def reset(self, obs: Optional[dict] = None):
+        """Reset per-episode state.
+
+        Args:
+            obs: If given, the first observation of the new episode. The
+                inventory/health baselines are primed from it so items the
+                bot carries across episodes do not produce a spurious
+                inventory-delta jackpot on step 1.
+        """
         self.prev_health = 20.0
         self.prev_food = 20.0
         self.prev_inventory_sum = 0.0
         self.prev_alive = True
         self._prev_held_item = None
         self._prev_inventory_counts = {}
+        if obs is not None:
+            inventory = np.asarray(
+                obs.get("inventory", np.zeros(1, dtype=np.float32))
+            )
+            self.prev_inventory_sum = float(inventory.sum())
+            self._prev_inventory_counts = self._inventory_counts_from_obs(obs)
+            # NOTE: health/food baselines are deliberately NOT primed from
+            # the reset observation -- it can race the respawn (health=0
+            # mid-/kill), which would fabricate a huge heal reward on step 1.
+            # A fresh episode always starts at full health after respawn.
+
+    @staticmethod
+    def _inventory_counts_from_obs(obs: dict) -> Dict[str, float]:
+        """Decode the fixed-size inventory vector into name -> count."""
+        inventory = np.asarray(obs.get("inventory", np.zeros(0, dtype=np.float32)))
+        counts: Dict[str, float] = {}
+        for name, idx in ITEM_NAME_TO_ID.items():
+            if idx < inventory.shape[0] and inventory[idx] > 0:
+                counts[name] = float(inventory[idx])
+        return counts
 
     def compute(
         self,
@@ -73,28 +109,31 @@ class RewardCalculator:
         reward = 0.0
 
         # ----- Survival / per-tick signals (sent by the Mineflayer bot) -----
-        # The bot already scales some signals (e.g. mob_killed = 50, death = -100).
-        reward += reward_signal.get("alive_tick", 0) * 0.05
-        reward += reward_signal.get("death", 0) * 1.0
-        reward += reward_signal.get("damage_taken", 0) * -5.0
+        # Small alive bonus; intentionally tiny so "stand still forever" is
+        # never the optimal policy.
+        reward += reward_signal.get("alive_tick", 0) * 0.01
+        # Death penalty lives ONLY here (the env does not add its own).
+        reward += reward_signal.get("death", 0) * -100.0
+        # Damage is punished ONLY here (no health_delta double-count below).
+        reward += reward_signal.get("damage_taken", 0) * -1.0
 
         # ----- Combat -----
-        reward += reward_signal.get("mob_killed", 0) * 1.0
-        reward += reward_signal.get("player_killed", 0) * 1.0
+        reward += reward_signal.get("mob_killed", 0) * 5.0
+        reward += reward_signal.get("player_killed", 0) * 10.0
 
-        # ----- Gathering / inventory -----
+        # ----- Gathering / crafting / building -----
         items_mined = reward_signal.get("item_mined", 0)
         reward += items_mined * 0.5
+        reward += reward_signal.get("item_crafted", 0) * 2.0
+        reward += reward_signal.get("block_placed", 0) * 0.2
         reward += reward_signal.get("item_lost", 0) * -5.0
 
         # ----- Knowledge-base mining efficiency bonus -----
         if self.knowledge_base is not None and items_mined > 0:
-            # Determine the currently held tool from the observation
             held_item_id = float(obs.get("self_held_item_id", [0.0])[0])
-            held_item_name = self._resolve_held_item_name(held_item_id)
+            held_item_name = ITEM_ID_TO_NAME.get(int(held_item_id))
             self._prev_held_item = held_item_name
 
-            # Try to infer the broken block from the reward signal
             block_broken = reward_signal.get("block_broken_name", None)
             if block_broken is not None and held_item_name is not None:
                 efficiency = self.knowledge_base.get_mining_efficiency(
@@ -127,7 +166,7 @@ class RewardCalculator:
 
         # Reward for any inventory growth (picking up items, crafting, etc.)
         inventory = obs.get("inventory", np.zeros(1, dtype=np.float32))
-        inventory_sum = float(inventory.sum())
+        inventory_sum = float(np.asarray(inventory).sum())
         inventory_delta = inventory_sum - self.prev_inventory_sum
         if inventory_delta > 0:
             reward += inventory_delta * 0.1
@@ -136,17 +175,15 @@ class RewardCalculator:
         # ----- Eating -----
         reward += reward_signal.get("food_eaten", 0) * 2.0
 
-        # ----- Health changes (from observation) -----
-        health = obs["self_health"][0]
+        # ----- Health regen (positive only; damage is via damage_taken) -----
+        health = float(np.asarray(obs["self_health"]).flat[0])
         health_delta = health - self.prev_health
-        if health_delta < 0:
-            reward += health_delta * 10.0  # -10 per damage
-        elif health_delta > 0:
-            reward += health_delta * 5.0  # +5 per heal
+        if health_delta > 0:
+            reward += health_delta * 2.0
         self.prev_health = health
 
         # ----- Food changes -----
-        food = obs["self_food"][0]
+        food = float(np.asarray(obs["self_food"]).flat[0])
         food_delta = food - self.prev_food
         if food_delta > 0:
             reward += food_delta * 2.0
@@ -156,8 +193,11 @@ class RewardCalculator:
         if self.goal and self.goal in self.GOAL_REWARDS:
             reward += self._compute_goal_reward(self.goal, obs, reward_signal)
 
-        # ----- Noop bias: small penalty for non-noop actions when safe -----
-        if action_idx != 0 and danger_level < 0.1:
+        # Update per-item inventory tracking (after goal shaping used it)
+        self._prev_inventory_counts = self._inventory_counts_from_obs(obs)
+
+        # ----- Noop bias: small penalty for idling when safe -----
+        if action_idx == 0 and danger_level < 0.1:
             reward -= self.noop_bias
 
         return float(np.clip(reward, -10.0, 10.0))
@@ -182,30 +222,33 @@ class RewardCalculator:
         """
         goal_cfg = self.GOAL_REWARDS[goal]
         bonus = 0.0
+        inventory = np.asarray(obs.get("inventory", np.zeros(0, dtype=np.float32)))
 
-        # --- Item acquisition goals ---
+        # --- Item acquisition goals: per-item inventory delta ---
         if "item" in goal_cfg:
             item_name: str = goal_cfg["item"]
-            target_count: int = int(
-                obs.get("inventory", np.zeros(1, dtype=np.float32)).sum()
-                if item_name == "oak_planks"
-                else 0
-            )
-            # For plank/stick goals, estimate count from inventory sum
-            # For other items, use reward_signal detection
-            items_gained = reward_signal.get("item_mined", 0) + reward_signal.get(
-                "item_crafted", 0
-            )
-            if items_gained > 0:
-                bonus += goal_cfg.get("bonus", 0.0)
-                bonus += items_gained * goal_cfg.get("per_item", 0.0)
+            idx = ITEM_NAME_TO_ID.get(item_name)
+            if idx is not None and idx < inventory.shape[0]:
+                delta = float(inventory[idx]) - self._prev_inventory_counts.get(
+                    item_name, 0.0
+                )
+                if delta > 0:
+                    bonus += goal_cfg.get("bonus", 0.0)
+                    bonus += delta * goal_cfg.get("per_item", 0.0)
 
         # --- Item-containment goals (e.g. any pickaxe, any sword) ---
         if "item_contains" in goal_cfg:
             contain_str: str = goal_cfg["item_contains"]
-            # Check if we just crafted/acquired a matching item
-            items_gained = reward_signal.get("item_crafted", 0)
-            if items_gained > 0:
+            gained = 0.0
+            for name, idx in ITEM_NAME_TO_ID.items():
+                if contain_str not in name or idx >= inventory.shape[0]:
+                    continue
+                delta = float(inventory[idx]) - self._prev_inventory_counts.get(
+                    name, 0.0
+                )
+                if delta > 0:
+                    gained += delta
+            if gained > 0:
                 bonus += goal_cfg.get("bonus", 0.0)
 
         # --- Block placement goals ---
@@ -240,50 +283,3 @@ class RewardCalculator:
                 bonus += distance * goal_cfg.get("per_block", 0.0)
 
         return bonus
-
-    def _resolve_held_item_name(self, held_item_id: float) -> Optional[str]:
-        """Map a held-item numeric ID to an item name string.
-
-        The observation space stores ``self_held_item_id`` as a float.
-        When the value is small we treat it as an internal enum index and
-        map it heuristically; otherwise we treat the raw value as a
-        Mineflayer block/item ID and return ``None`` (unknown).
-        """
-        item_id = int(held_item_id)
-        if item_id <= 0:
-            return None
-
-        # Heuristic mapping for common tool IDs used by the bot
-        _ID_MAP = {
-            1: "wooden_pickaxe",
-            2: "wooden_axe",
-            3: "wooden_sword",
-            4: "wooden_shovel",
-            5: "wooden_hoe",
-            11: "stone_pickaxe",
-            12: "stone_axe",
-            13: "stone_sword",
-            14: "stone_shovel",
-            15: "stone_hoe",
-            21: "iron_pickaxe",
-            22: "iron_axe",
-            23: "iron_sword",
-            24: "iron_shovel",
-            25: "iron_hoe",
-            31: "diamond_pickaxe",
-            32: "diamond_axe",
-            33: "diamond_sword",
-            34: "diamond_shovel",
-            35: "diamond_hoe",
-            41: "golden_pickaxe",
-            42: "golden_axe",
-            43: "golden_sword",
-            44: "golden_shovel",
-            45: "golden_hoe",
-            50: "stick",
-            51: "crafting_table",
-            52: "furnace",
-            53: "chest",
-            54: "torch",
-        }
-        return _ID_MAP.get(item_id)

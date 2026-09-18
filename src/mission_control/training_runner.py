@@ -85,11 +85,36 @@ class TrainingManager:
             self.pending_action = None
 
     def execute_command(self, cmd: str):
-        # Forward to bot via env wrapper if available; for now echo and log.
+        """Forward a server command to the live bot via the env's socket."""
         self.post_message({"type": "terminal", "text": f"> {cmd}", "kind": "command"})
-        self.post_message(
-            {"type": "terminal", "text": f"Executed: {cmd}", "kind": "success"}
-        )
+        env = self.env
+        target = getattr(env, "env", env)  # unwrap MissionControlEnvWrapper
+        if target is not None and hasattr(target, "send_text_command"):
+            if target.send_text_command(cmd):
+                self.post_message(
+                    {
+                        "type": "terminal",
+                        "text": f"Sent to bot: {cmd}",
+                        "kind": "success",
+                    }
+                )
+            else:
+                self.post_message(
+                    {
+                        "type": "terminal",
+                        "text": "Command failed: bot socket not connected",
+                        "kind": "error",
+                    }
+                )
+        else:
+            self.post_message(
+                {
+                    "type": "terminal",
+                    "text": "Command NOT executed: no live bot connection "
+                    "(start training first)",
+                    "kind": "error",
+                }
+            )
 
     def inventory_action(self, action: str, data: Dict[str, Any]):
         self.post_message(

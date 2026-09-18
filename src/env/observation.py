@@ -110,23 +110,53 @@ ITEM_NAME_TO_ID = {
     "apple": 29,
     "arrow": 30,
     "oak_planks": 31,
+    "raw_iron": 32,
 }
 
 ITEM_ID_TO_NAME = {int(item_id): name for name, item_id in ITEM_NAME_TO_ID.items()}
 
+# Canonical goal vocabulary -- the single source of truth shared by
+# AutonomousCurriculum.GOAL_CATALOG, RewardCalculator.GOAL_REWARDS and the
+# guided CurriculumManager stages. Fits the goal embedding (16 slots) and the
+# goal_id observation space (Box 0..15).
 GOAL_TO_ID = {
-    "basic_movement": 0,
-    "punch_wood": 1,
-    "craft_pickaxe": 2,
-    "mine_stone": 3,
-    "fight_passive": 4,
-    "fight_hostile": 5,
-    "build_shelter": 6,
-    "survive_first_night": 7,
-    "mine_iron": 8,
-    "full_survival": 9,
-    "pvp_combat": 10,
+    "survive": 0,
+    "gather_logs": 1,
+    "gather_stone": 2,
+    "gather_coal": 3,
+    "gather_iron": 4,
+    "craft_planks": 5,
+    "craft_sticks": 6,
+    "craft_crafting_table": 7,
+    "craft_pickaxe": 8,
+    "craft_sword": 9,
+    "craft_torch": 10,
+    "eat_food": 11,
+    "fight_hostile": 12,
+    "build_shelter": 13,
+    "explore": 14,
+    "survive_first_night": 15,
 }
+
+NUM_GOALS = len(GOAL_TO_ID)
+
+# Legacy goal names (old guided curriculum / configs) mapped onto the
+# canonical vocabulary so old checkpoints and scripts keep working.
+LEGACY_GOAL_ALIASES = {
+    "basic_movement": "explore",
+    "punch_wood": "gather_logs",
+    "mine_stone": "gather_stone",
+    "mine_iron": "gather_iron",
+    "fight_passive": "fight_hostile",
+    "full_survival": "survive",
+    "pvp_combat": "fight_hostile",
+}
+
+
+def goal_to_id(goal: str) -> int:
+    """Map a goal name (canonical or legacy) to its numeric ID."""
+    canonical = LEGACY_GOAL_ALIASES.get(goal, goal)
+    return GOAL_TO_ID.get(canonical, GOAL_TO_ID["survive"])
 
 MAX_ENTITIES = 16
 MAX_DANGER_BLOCKS = 8
@@ -154,6 +184,8 @@ EVENT_TYPE_TO_ID = {
     "block_broken": 3,
     "item_collected": 4,
     "food_eaten": 5,
+    "item_crafted": 6,
+    "block_placed": 7,
 }
 
 
@@ -361,7 +393,7 @@ def build_observation(raw_obs: dict) -> dict:
         "env_danger_level": np.array(
             [env_data.get("danger_level", 0.0)], dtype=np.float32
         ),
-        "goal_id": np.array([GOAL_TO_ID.get(goal_str, 7)], dtype=np.float32),
+        "goal_id": np.array([goal_to_id(goal_str)], dtype=np.float32),
     }
     return obs
 

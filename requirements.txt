@@ -6,7 +6,6 @@ numpy>=1.24.0
 
 # Environment & IPC
 pyyaml>=6.0
-minecraft-data>=3.17.0
 
 # Dashboard
 matplotlib>=3.7.0

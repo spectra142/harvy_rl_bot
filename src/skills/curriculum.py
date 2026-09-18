@@ -24,7 +24,7 @@ class CurriculumManager:
     DEFAULT_CURRICULUM = [
         CurriculumStage(
             name="basic_movement",
-            goal="basic_movement",
+            goal="explore",
             max_episode_steps=200,
             success_threshold=0.8,
             reward_shaping={"distance_reward": 1.0, "fall_penalty": -5.0},
@@ -32,7 +32,7 @@ class CurriculumManager:
         ),
         CurriculumStage(
             name="punch_wood",
-            goal="punch_wood",
+            goal="gather_logs",
             max_episode_steps=500,
             success_threshold=0.7,
             reward_shaping={"log_reward": 2.0, "pickup_reward": 1.0},
@@ -52,7 +52,7 @@ class CurriculumManager:
         ),
         CurriculumStage(
             name="mine_stone",
-            goal="mine_stone",
+            goal="gather_stone",
             max_episode_steps=1000,
             success_threshold=0.6,
             reward_shaping={"stone_reward": 1.0, "pickaxe_bonus": 3.0},
@@ -60,7 +60,7 @@ class CurriculumManager:
         ),
         CurriculumStage(
             name="fight_passive",
-            goal="fight_passive",
+            goal="eat_food",
             max_episode_steps=500,
             success_threshold=0.6,
             reward_shaping={"kill_reward": 10.0, "hit_reward": 2.0},
@@ -104,7 +104,7 @@ class CurriculumManager:
         ),
         CurriculumStage(
             name="mine_iron",
-            goal="mine_iron",
+            goal="gather_iron",
             max_episode_steps=3000,
             success_threshold=0.4,
             reward_shaping={"iron_reward": 5.0, "coal_reward": 2.0, "depth_bonus": 1.0},
@@ -112,7 +112,7 @@ class CurriculumManager:
         ),
         CurriculumStage(
             name="full_survival",
-            goal="full_survival",
+            goal="survive",
             max_episode_steps=6000,
             success_threshold=0.5,
             reward_shaping={"composite_score": 1.0},
@@ -120,7 +120,7 @@ class CurriculumManager:
         ),
         CurriculumStage(
             name="pvp_combat",
-            goal="pvp_combat",
+            goal="fight_hostile",
             max_episode_steps=2000,
             success_threshold=0.4,
             reward_shaping={

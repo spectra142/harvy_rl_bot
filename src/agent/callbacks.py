@@ -13,56 +13,65 @@ logger = logging.getLogger(__name__)
 
 
 class CurriculumCallback(BaseCallback):
-    """Manages curriculum learning stages during training."""
+    """Drives the shared CurriculumManager during guided training.
+
+    This is the ONLY curriculum driver in guided mode: it records episode
+    outcomes into the manager and pushes the manager's current stage goal
+    into the environment, so the two never drift out of sync.
+    """
 
     def __init__(
         self,
-        curriculum_stages: list,
+        curriculum_manager,
         switch_threshold: float = 0.7,
-        eval_freq: int = 10000,
         verbose: int = 0,
     ):
         super().__init__(verbose)
-        self.curriculum_stages = curriculum_stages
-        self.current_stage = 0
+        self.manager = curriculum_manager
         self.switch_threshold = switch_threshold
-        self.eval_freq = eval_freq
-        self.stage_rewards = []
+        self._episodes_recorded = 0
 
     def _on_training_start(self) -> None:
-        self.logger.record("curriculum/stage", self.current_stage)
-        self.logger.record(
-            "curriculum/stage_name", self.curriculum_stages[self.current_stage]
-        )
-
-    def _on_step(self) -> bool:
-        if self.n_calls % self.eval_freq == 0:
-            # Check if we should advance curriculum
-            recent_rewards = (
-                self.stage_rewards[-10:]
-                if len(self.stage_rewards) >= 10
-                else self.stage_rewards
-            )
-            if recent_rewards and np.mean(recent_rewards) > self.switch_threshold:
-                if self.current_stage < len(self.curriculum_stages) - 1:
-                    self.current_stage += 1
-                    if self.verbose > 0:
-                        print(
-                            f"Advancing to curriculum stage {self.current_stage}: "
-                            f"{self.curriculum_stages[self.current_stage]}"
-                        )
-                    # Update environment goal
-                    self.training_env.env_method(
-                        "set_goal", self.curriculum_stages[self.current_stage]
-                    )
-            self.logger.record("curriculum/stage", self.current_stage)
-        return True
+        stage = self.manager.current_stage
+        self.logger.record("curriculum/stage", self.manager.current_stage_idx)
+        self.logger.record("curriculum/stage_name", stage.name)
+        self.training_env.env_method("set_goal", stage.goal)
 
     def _on_rollout_end(self) -> None:
-        # Record mean episode reward for curriculum evaluation
-        if len(self.model.ep_info_buffer) > 0:
-            mean_reward = np.mean([ep["r"] for ep in self.model.ep_info_buffer])
-            self.stage_rewards.append(mean_reward)
+        # Record only NEW episodes into the manager (it decides advancement).
+        # Monitor's get_episode_rewards() is append-only, so a simple offset
+        # into it is a reliable cursor (unlike the rolling ep_info_buffer).
+        try:
+            per_env = self.training_env.env_method("get_episode_rewards")
+            all_rewards = [r for env_rewards in per_env for r in env_rewards]
+        except Exception:
+            all_rewards = []
+        fresh = all_rewards[self._episodes_recorded:]
+        self._episodes_recorded = len(all_rewards)
+        for r in fresh:
+            self.manager.record_episode(r > self.switch_threshold, r)
+
+        stage = self.manager.current_stage
+        self.training_env.env_method("set_goal", stage.goal)
+        self.logger.record("curriculum/stage", self.manager.current_stage_idx)
+        self.logger.record("curriculum/stage_name", stage.name)
+
+
+class AuxStateCallback(BaseCallback):
+    """Saves auxiliary training state (obs normalizer stats, RND predictor)
+    alongside the PPO checkpoints so resuming keeps identical observation
+    and intrinsic-reward distributions."""
+
+    def __init__(self, save_freq: int, save_path_prefix: str, verbose: int = 0):
+        super().__init__(verbose)
+        self.save_freq = save_freq
+        self.save_path_prefix = save_path_prefix
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.save_freq == 0:
+            prefix = f"{self.save_path_prefix}_{self.num_timesteps}_steps"
+            self.training_env.env_method("save_aux_state", prefix)
+        return True
 
 
 class MetricsLoggerCallback(BaseCallback):
