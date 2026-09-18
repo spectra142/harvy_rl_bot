@@ -1568,9 +1568,10 @@ function createBot() {
     // painful to install on some platforms. ENABLE_VIEWER=1 to turn it on.
     if (process.env.ENABLE_VIEWER === '1') {
       try {
-        const viewer = require('prismarine-viewer').bot;
-        viewer(bot, { port: parseInt(process.env.VIEWER_PORT, 10) || 3007, firstPerson: true });
-        log(LOG_LEVELS.INFO, 'Prismarine viewer started');
+        const pv = require('prismarine-viewer');
+        const startViewer = pv.mineflayer || (pv.viewer && pv.viewer.bot) || pv.bot;
+        startViewer(bot, { port: parseInt(process.env.VIEWER_PORT, 10) || 3007, firstPerson: true });
+        log(LOG_LEVELS.INFO, `Prismarine viewer started on port ${parseInt(process.env.VIEWER_PORT, 10) || 3007}`);
       } catch (err) {
         log(LOG_LEVELS.WARN, 'Failed to start viewer:', err.message);
       }
