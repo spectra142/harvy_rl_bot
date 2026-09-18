@@ -703,24 +703,27 @@ const SkillExecutor = {
         const pickaxeName = tier === 'iron' ? 'iron_pickaxe' : (tier === 'stone' ? 'stone_pickaxe' : 'wooden_pickaxe');
         const pickaxeItem = mcData.itemsByName[pickaxeName];
         if (!pickaxeItem) { this.completeSkill('no_pickaxe_item'); return; }
-        const recipe = bot.recipesFor(pickaxeItem.id, null, 1, true)[0]; // require crafting table
-        if (!recipe) {
-          // Try without crafting table
-          const recipeNoTable = bot.recipesFor(pickaxeItem.id, null, 1, false)[0];
-          if (recipeNoTable) {
-            bot.craft(recipeNoTable, 1)
-              .then(() => { this.completeSkill('done'); })
-              .catch((err) => { log(LOG_LEVELS.DEBUG, 'Craft pickaxe failed:', err.message); this.completeSkill('craft_failed'); });
-            this.skillState = 'crafting_async';
-            return;
-          }
-          this.completeSkill('no_recipe');
-          return;
-        }
-        bot.craft(recipe, 1)
-          .then(() => { this.completeSkill('done'); })
-          .catch((err) => { log(LOG_LEVELS.DEBUG, 'Craft pickaxe failed:', err.message); this.completeSkill('craft_failed'); });
         this.skillState = 'crafting_async';
+        (async () => {
+          try {
+            // Pickaxes need a 3x3 grid: find a nearby table or place one.
+            const table = await ensureCraftingTable();
+            const recipes = bot.recipesFor(pickaxeItem.id, null, 1, table || false);
+            const recipesNoTable = bot.recipesFor(pickaxeItem.id, null, 1, false);
+            log(LOG_LEVELS.DEBUG, `Pickaxe craft: table=${table ? table.position.toString() : 'null'} ` +
+              `recipes=${recipes.length} recipesNoTable=${recipesNoTable.length} ` +
+              `planks=${bot.inventory.count(mcData.itemsByName['oak_planks']?.id)} ` +
+              `sticks=${bot.inventory.count(mcData.itemsByName['stick']?.id)} ` +
+              `tier=${this.skillData.tier}`);
+            const recipe = recipes[0];
+            if (!recipe) { this.completeSkill('no_recipe'); return; }
+            await bot.craft(recipe, 1, table || undefined);
+            this.completeSkill('done');
+          } catch (err) {
+            log(LOG_LEVELS.DEBUG, 'Craft pickaxe failed:', err.message);
+            this.completeSkill('craft_failed');
+          }
+        })();
         break;
       }
 
@@ -766,23 +769,20 @@ const SkillExecutor = {
         const swordName = tier === 'iron' ? 'iron_sword' : (tier === 'stone' ? 'stone_sword' : 'wooden_sword');
         const swordItem = mcData.itemsByName[swordName];
         if (!swordItem) { this.completeSkill('no_sword_item'); return; }
-        const recipe = bot.recipesFor(swordItem.id, null, 1, true)[0];
-        if (!recipe) {
-          const recipeNoTable = bot.recipesFor(swordItem.id, null, 1, false)[0];
-          if (recipeNoTable) {
-            bot.craft(recipeNoTable, 1)
-              .then(() => { this.completeSkill('done'); })
-              .catch((err) => { log(LOG_LEVELS.DEBUG, 'Craft sword failed:', err.message); this.completeSkill('craft_failed'); });
-            this.skillState = 'crafting_async';
-            return;
-          }
-          this.completeSkill('no_recipe');
-          return;
-        }
-        bot.craft(recipe, 1)
-          .then(() => { this.completeSkill('done'); })
-          .catch((err) => { log(LOG_LEVELS.DEBUG, 'Craft sword failed:', err.message); this.completeSkill('craft_failed'); });
         this.skillState = 'crafting_async';
+        (async () => {
+          try {
+            // Swords need a 3x3 grid: find a nearby table or place one.
+            const table = await ensureCraftingTable();
+            const recipe = bot.recipesFor(swordItem.id, null, 1, table || false)[0];
+            if (!recipe) { this.completeSkill('no_recipe'); return; }
+            await bot.craft(recipe, 1, table || undefined);
+            this.completeSkill('done');
+          } catch (err) {
+            log(LOG_LEVELS.DEBUG, 'Craft sword failed:', err.message);
+            this.completeSkill('craft_failed');
+          }
+        })();
         break;
       }
 
@@ -802,6 +802,12 @@ const SkillExecutor = {
         break;
 
       case 'checking_materials': {
+        // Already holding a table? Don't burn 4 planks on another one.
+        const existingTable = mcData.itemsByName['crafting_table'];
+        if (existingTable && bot.inventory.count(existingTable.id) >= 1) {
+          this.completeSkill('done');
+          return;
+        }
         const plankTypes = ['oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks'];
         let hasPlanks = false;
         for (const pt of plankTypes) {
@@ -1039,6 +1045,12 @@ const SkillExecutor = {
           if (index >= targets.length) {
             bot.pathfinder.setGoal(null);
             this.completeSkill('done');
+          } else if (this.skillData.placing &&
+                     tickCount - (this.skillData.placingSince || 0) > 100) {
+            // Watchdog: a place promise that never settles must not stall
+            // the FSM -- skip the target and move on.
+            this.skillData.placing = false;
+            this.skillData.targetIndex = (this.skillData.targetIndex || 0) + 1;
           }
           return;
         }
@@ -1056,7 +1068,13 @@ const SkillExecutor = {
         bot.equip(item, 'hand')
           .then(() => {
             const ref = bot.blockAt(vec3(target.x, target.y - 1, target.z));
-            if (ref && ref.boundingBox === 'block' && ref.name !== blockName) {
+            const tgt = bot.blockAt(vec3(target.x, target.y, target.z));
+            // Place when the target cell is empty/replaceable and the block
+            // below it is solid -- even if that block is one we just placed
+            // (upper wall courses sit on our own lower course).
+            const targetEmpty = !tgt || tgt.boundingBox !== 'block';
+            const refSolid = ref && ref.boundingBox === 'block';
+            if (targetEmpty && refSolid) {
               return bot.placeBlock(ref, vec3(0, 1, 0));
             }
             return Promise.reject(new Error('no_reference'));
@@ -1065,11 +1083,13 @@ const SkillExecutor = {
             this.skillData.targetIndex = (this.skillData.targetIndex || 0) + 1;
             this.skillData.placing = false;
           })
-          .catch(() => {
+          .catch((err) => {
+            log(LOG_LEVELS.DEBUG, `Shelter place failed at target ${this.skillData.targetIndex}: ${err.message}`);
             this.skillData.targetIndex = (this.skillData.targetIndex || 0) + 1;
             this.skillData.placing = false;
           });
         this.skillData.placing = true;
+        this.skillData.placingSince = tickCount;
         break;
       }
 
@@ -1380,6 +1400,38 @@ function findSafeShelterSpot(pos) {
   return null;
 }
 
+/**
+ * Find a crafting table within reach, or place one from inventory next to
+ * the bot. Returns the table block, or null if neither was possible.
+ */
+async function ensureCraftingTable() {
+  if (!mcData) return null;
+  const tableId = mcData.blocksByName['crafting_table']?.id;
+  if (!tableId) return null;
+  const existing = bot.findBlock({ matching: tableId, maxDistance: 6 });
+  if (existing) return existing;
+  const item = bot.inventory.items().find(i => i.name === 'crafting_table');
+  if (!item) return null;
+  const pos = bot.entity.position.floored();
+  const offsets = [[1, -1, 0], [-1, -1, 0], [0, -1, 1], [0, -1, -1]];
+  for (const [dx, dy, dz] of offsets) {
+    const ref = bot.blockAt(pos.offset(dx, dy, dz));
+    const cell = bot.blockAt(pos.offset(dx, dy + 1, dz));
+    const cellEmpty = !cell || (cell.boundingBox !== 'block' && cell.name !== 'crafting_table');
+    if (ref && ref.boundingBox === 'block' && cellEmpty) {
+      try {
+        await bot.equip(item, 'hand');
+        await bot.placeBlock(ref, vec3(0, 1, 0));
+        const placed = bot.blockAt(pos.offset(dx, dy + 1, dz));
+        if (placed && placed.name === 'crafting_table') return placed;
+      } catch (err) {
+        log(LOG_LEVELS.DEBUG, `Table placement failed at ${dx},${dz}: ${err.message}`);
+      }
+    }
+  }
+  return null;
+}
+
 function generateShelterTargets(pos) {
   const cx = Math.floor(pos.x);
   const cy = Math.floor(pos.y);
@@ -1512,7 +1564,9 @@ function createBot() {
     log(LOG_LEVELS.INFO, 'Bot spawned in world');
     resetRewardState();
     startTcpServer();
-    if (process.env.ENABLE_VIEWER !== '0') {
+    // The viewer is opt-in: it needs the native 'canvas' module, which is
+    // painful to install on some platforms. ENABLE_VIEWER=1 to turn it on.
+    if (process.env.ENABLE_VIEWER === '1') {
       try {
         const viewer = require('prismarine-viewer').bot;
         viewer(bot, { port: parseInt(process.env.VIEWER_PORT, 10) || 3007, firstPerson: true });
@@ -1553,11 +1607,13 @@ function createBot() {
     const type = entity.type || 'unknown';
     const name = entity.name || entity.username || 'unknown';
     log(LOG_LEVELS.DEBUG, `Entity died: type=${type}, name=${name}`);
-    if (type === 'mob') {
+    if (type === 'player') {
+      rewardState.killBuffer.push({ type: 'player', name });
+    } else if (type === 'mob' || type === 'hostile' || type === 'animal' || isHostileMob(entity)) {
+      // mineflayer reports living entities with fine-grained types
+      // ('hostile', 'animal', ...) -- anything non-player that lived counts.
       rewardState.killBuffer.push({ type: 'mob', name });
       recordEvent('mob_attacked', 1);
-    } else if (type === 'player') {
-      rewardState.killBuffer.push({ type: 'player', name });
     }
   });
 

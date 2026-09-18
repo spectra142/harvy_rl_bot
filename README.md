@@ -144,7 +144,7 @@ and `TCP server listening on port 9876`.
 | `TCP_PORT` | `9876` | Port for the Python ↔ bot protocol |
 | `MC_RESET_COMMANDS` | `1` | Set `0` to disable `/clear` + `/kill` episode resets |
 | `MC_CONFIG_WORKAROUND` | off | Set `1` only for old servers with a broken config phase |
-| `ENABLE_VIEWER` | `1` | Set `0` to disable the prismarine-viewer POV |
+| `ENABLE_VIEWER` | *(off)* | Set `1` to enable the prismarine-viewer POV (needs the native `canvas` module) |
 | `VIEWER_PORT` | `3007` | POV viewer port |
 | `DEBUG` | off | Set `1` for verbose logging |
 
