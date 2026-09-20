@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Minecraft Bot Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1113;
+    --panel: #171a1d;
+    --panel-border: #262b30;
+    --text: #d7dde3;
+    --muted: #7d8790;
+    --green: #5fd94f;
+    --green-dim: #3aa32f;
+    --red: #e05555;
+    --yellow: #e6c34a;
+    --blue: #5aa9e6;
+    --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 22px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--panel-border);
+  }
+  header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .grass-icon {
+    width: 22px; height: 22px;
+    image-rendering: pixelated;
+    background:
+      linear-gradient(#5fd94f 0 35%, #8a5a2b 35% 100%);
+    box-shadow: inset 0 -3px 0 #6b441f, inset 0 3px 0 #7fe86e;
+    border-radius: 3px;
+  }
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .dot {
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 50% { opacity: .5; } }
+
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 16px;
+    padding: 16px 22px;
+    max-width: 1400px;
+    width: 100%;
+    margin: 0 auto;
+  }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .card-title {
+    padding: 12px 16px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--muted);
+    border-bottom: 1px solid var(--panel-border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  /* POV */
+  #pov {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    display: block;
+    background: #000;
+    image-rendering: pixelated;
+  }
+  .coords {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    border-top: 1px solid var(--panel-border);
+  }
+  .coord {
+    padding: 14px 16px;
+    text-align: center;
+    border-right: 1px solid var(--panel-border);
+  }
+  .coord:last-child { border-right: none; }
+  .coord .axis { font-size: 12px; color: var(--muted); letter-spacing: 2px; }
+  .coord .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+  .coord.x .value { color: var(--red); }
+  .coord.y .value { color: var(--green); }
+  .coord.z .value { color: var(--blue); }
+
+  .meta {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    border-top: 1px solid var(--panel-border);
+  }
+  .meta div {
+    padding: 10px 16px;
+    font-size: 13px;
+    border-right: 1px solid var(--panel-border);
+    color: var(--muted);
+  }
+  .meta div:last-child { border-right: none; }
+  .meta span { color: var(--text); }
+
+  /* Logs */
+  #log-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 0;
+    font-size: 13px;
+    line-height: 1.7;
+    min-height: 300px;
+    max-height: calc(100vh - 220px);
+  }
+  .log-line {
+    padding: 2px 16px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .log-line:hover { background: #1e2226; }
+  .log-time { color: var(--muted); margin-right: 8px; }
+  .log-line.info  .log-msg { color: var(--text); }
+  .log-line.warn  .log-msg { color: var(--yellow); }
+  .log-line.error .log-msg { color: var(--red); }
+  .log-line.chat  .log-msg { color: var(--green); }
+  .log-tag {
+    display: inline-block;
+    width: 52px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  #log-list::-webkit-scrollbar { width: 8px; }
+  #log-list::-webkit-scrollbar-thumb { background: var(--panel-border); border-radius: 4px; }
+
+  .autoscroll-label {
+    font-size: 11px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span class="grass-icon"></span>MINECRAFT BOT DASHBOARD</h1>
+  <div class="status"><span class="dot"></span> Bot Online — <span id="bot-name">Steve_Bot</span></div>
+</header>
+
+<main>
+  <!-- POV Location -->
+  <section class="card">
+    <div class="card-title">POV — Live View</div>
+    <canvas id="pov" width="640" height="360"></canvas>
+    <div class="coords">
+      <div class="coord x"><div class="axis">X</div><div class="value" id="cx">0</div></div>
+      <div class="coord y"><div class="axis">Y</div><div class="value" id="cy">64</div></div>
+      <div class="coord z"><div class="axis">Z</div><div class="value" id="cz">0</div></div>
+    </div>
+    <div class="meta">
+      <div>Dimension: <span id="dim">Overworld</span></div>
+      <div>Facing: <span id="facing">North</span></div>
+      <div>Biome: <span id="biome">Plains</span></div>
+    </div>
+  </section>
+
+  <!-- Logs -->
+  <section class="card">
+    <div class="card-title">
+      Logs
+      <label class="autoscroll-label">
+        <input type="checkbox" id="autoscroll" checked> auto-scroll
+      </label>
+    </div>
+    <div id="log-list"></div>
+  </section>
+</main>
+
+<script>
+/* ---------- Mock POV renderer (fake first-person blocky scene) ---------- */
+const canvas = document.getElementById("pov");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+
+let yaw = 0;
+function drawPOV(t) {
+  yaw += 0.002;
+
+  // sky
+  const sky = ctx.createLinearGradient(0, 0, 0, H * 0.55);
+  sky.addColorStop(0, "#6fa8dc");
+  sky.addColorStop(1, "#bfe3ff");
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H * 0.55);
+
+  // sun
+  ctx.fillStyle = "#fff3b0";
+  ctx.fillRect(W * 0.75, H * 0.08, 34, 34);
+
+  // distant hills
+  ctx.fillStyle = "#7aa55c";
+  for (let i = 0; i < 12; i++) {
+    const x = ((i * 97 - yaw * 220) % (W + 120)) - 60;
+    ctx.fillRect(x, H * 0.44, 90, H * 0.11);
+  }
+
+  // ground
+  ctx.fillStyle = "#4e8f3a";
+  ctx.fillRect(0, H * 0.55, W, H * 0.45);
+
+  // fake perspective block grid on ground
+  ctx.strokeStyle = "rgba(0,0,0,0.18)";
+  ctx.lineWidth = 1;
+  const horizon = H * 0.55;
+  for (let i = 0; i <= 16; i++) {
+    const p = i / 16;
+    const y = horizon + Math.pow(p, 1.8) * (H - horizon);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  for (let i = -8; i <= 8; i++) {
+    const offset = ((yaw * 2) % 1);
+    const bx = W / 2 + (i + offset) * 40;
+    ctx.beginPath();
+    ctx.moveTo(W / 2 + (i + offset) * 6, horizon);
+    ctx.lineTo(bx * 1.6 - W * 0.3, H);
+    ctx.stroke();
+  }
+
+  // a couple of "trees"
+  for (let i = 0; i < 4; i++) {
+    const x = ((i * 211 - yaw * 380) % (W + 100)) - 50;
+    const s = 0.7 + (i % 3) * 0.25;
+    ctx.fillStyle = "#6b441f";
+    ctx.fillRect(x, H * 0.55 - 46 * s, 10 * s, 46 * s);
+    ctx.fillStyle = "#2f7a24";
+    ctx.fillRect(x - 14 * s, H * 0.55 - 78 * s, 38 * s, 36 * s);
+  }
+
+  // crosshair
+  ctx.strokeStyle = "rgba(255,255,255,0.85)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(W/2 - 8, H/2); ctx.lineTo(W/2 + 8, H/2);
+  ctx.moveTo(W/2, H/2 - 8); ctx.lineTo(W/2, H/2 + 8);
+  ctx.stroke();
+
+  // hotbar hint
+  ctx.fillStyle = "rgba(0,0,0,0.4)";
+  ctx.fillRect(W/2 - 91, H - 24, 182, 20);
+  ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  ctx.strokeRect(W/2 - 91, H - 24, 182, 20);
+  ctx.strokeStyle = "#fff";
+  ctx.strokeRect(W/2 - 91, H - 24, 20, 20);
+
+  requestAnimationFrame(drawPOV);
+}
+requestAnimationFrame(drawPOV);
+
+/* ---------- Mock live location ---------- */
+const pos = { x: 128.4, y: 64, z: -245.7 };
+const dirs = ["North", "North-East", "East", "South-East", "South", "South-West", "West", "North-West"];
+const biomes = ["Plains", "Forest", "Desert", "Mountains", "Swamp", "River"];
+let dirIdx = 0;
+
+setInterval(() => {
+  pos.x += (Math.random() - 0.5) * 1.4;
+  pos.z += (Math.random() - 0.5) * 1.4;
+  if (Math.random() < 0.15) dirIdx = Math.floor(Math.random() * 8);
+  if (Math.random() < 0.05) document.getElementById("biome").textContent =
+    biomes[Math.floor(Math.random() * biomes.length)];
+
+  document.getElementById("cx").textContent = pos.x.toFixed(1);
+  document.getElementById("cy").textContent = pos.y.toFixed(0);
+  document.getElementById("cz").textContent = pos.z.toFixed(1);
+  document.getElementById("facing").textContent = dirs[dirIdx];
+}, 800);
+
+/* ---------- Mock log stream ---------- */
+const logList = document.getElementById("log-list");
+const autoScroll = document.getElementById("autoscroll");
+
+const templates = [
+  ["info",  "Bot connected to server play.example.net:25565"],
+  ["info",  "Pathfinding to (130, 64, -240)"],
+  ["info",  "Picked up item: oak_log x2"],
+  ["chat",  "<VillagerTrader> hello there!"],
+  ["warn",  "Entity too close: Zombie at 4.2 blocks"],
+  ["info",  "Placed block: dirt at (129, 63, -246)"],
+  ["error", "Failed to break block: bedrock is unbreakable"],
+  ["chat",  "<Steve_Bot> collecting wood..."],
+  ["warn",  "Hunger below 6, searching for food"],
+  ["info",  "Ate bread, hunger restored"],
+];
+
+function addLog(type, msg) {
+  const now = new Date();
+  const time = now.toTimeString().slice(0, 8);
+  const line = document.createElement("div");
+  line.className = "log-line " + type;
+  line.innerHTML =
+    `<span class="log-time">${time}</span>` +
+    `<span class="log-tag">[${type.toUpperCase()}]</span>` +
+    `<span class="log-msg"></span>`;
+  line.querySelector(".log-msg").textContent = msg;
+  logList.appendChild(line);
+  if (logList.children.length > 200) logList.removeChild(logList.firstChild);
+  if (autoScroll.checked) logList.scrollTop = logList.scrollHeight;
+}
+
+// seed with a few lines, then stream
+addLog("info", "Dashboard connected to bot stream");
+addLog("info", "Spawned at (128, 64, -246) in Overworld");
+setInterval(() => {
+  const [type, msg] = templates[Math.floor(Math.random() * templates.length)];
+  addLog(type, msg);
+}, 1600);
+</script>
+
+</body>
+</html>
